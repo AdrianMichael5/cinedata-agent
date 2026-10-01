@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from cinedata_agent.db import validator as validator_module
 from cinedata_agent.db.errors import UnsafeQueryError
 from cinedata_agent.db.schema import SQLITE_ALLOWED_SCHEMAS, SQLITE_ALLOWED_TABLES
 from cinedata_agent.db.validator import validate_select
@@ -361,3 +362,66 @@ class TestTableAllowlist:
         assert validate_select("SELECT * FROM gold.dim_movies", allowed_schemas=schemas)
         with pytest.raises(UnsafeQueryError):
             validate_select("SELECT * FROM main.dim_movies", allowed_schemas=schemas)
+
+
+class TestCteScope:
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            pytest.param(
+                "SELECT * FROM sqlite_master "
+                "WHERE 1 IN (WITH sqlite_master AS (SELECT 1) SELECT 1)",
+                id="cte-in-where-subquery",
+            ),
+            pytest.param(
+                "SELECT * FROM alembic_version "
+                "CROSS JOIN (WITH alembic_version AS (SELECT 1) SELECT 1) AS t",
+                id="cte-in-joined-subquery",
+            ),
+            pytest.param(
+                "SELECT (WITH segredo AS (SELECT 1) SELECT 1) AS x FROM segredo",
+                id="cte-in-select-list",
+            ),
+            pytest.param(
+                "SELECT x FROM segredo UNION SELECT * FROM (WITH segredo AS (SELECT 1) SELECT 1)",
+                id="cte-in-other-union-branch",
+            ),
+        ],
+    )
+    def test_cte_name_out_of_scope_does_not_unlock_a_table(self, sql):
+        with pytest.raises(UnsafeQueryError, match="Tabela não permitida"):
+            validate_select(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            pytest.param(
+                "SELECT titulo FROM dim_movies WHERE sk_movie_id IN "
+                "(WITH ids AS (SELECT sk_movie_id FROM dim_reviews) SELECT sk_movie_id FROM ids)",
+                id="cte-inside-subquery",
+            ),
+            pytest.param(
+                "WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT x FROM b",
+                id="cte-reads-earlier-cte",
+            ),
+            pytest.param(
+                "WITH a AS (SELECT 1 AS x) SELECT x FROM a UNION SELECT x FROM a",
+                id="cte-in-both-union-branches",
+            ),
+            pytest.param(
+                "WITH a AS (SELECT 1 AS x) SELECT x FROM (SELECT x FROM a) AS t",
+                id="cte-read-from-derived-table",
+            ),
+        ],
+    )
+    def test_cte_in_scope_is_accepted(self, sql):
+        assert validate_select(sql)
+
+
+class TestForbiddenFunctionNodes:
+    def test_typed_function_nodes_are_checked_too(self, monkeypatch):
+        # sqlglot models UPPER as a typed node (exp.Upper), not exp.Anonymous.
+        monkeypatch.setattr(validator_module, "FORBIDDEN_FUNCTIONS", frozenset({"upper"}))
+
+        with pytest.raises(UnsafeQueryError, match="Função não permitida: upper"):
+            validate_select("SELECT UPPER('a')")

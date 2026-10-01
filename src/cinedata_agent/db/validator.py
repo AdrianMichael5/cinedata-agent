@@ -65,6 +65,12 @@ def validate_select(
     return tree.sql(dialect=dialect, comments=False)
 
 
+def defined_cte_names(sql: str, dialect: str = "sqlite") -> frozenset[str]:
+    """Lower-case names of every CTE defined in an already validated query."""
+    tree = _parse_single_statement(sql, dialect)
+    return frozenset(cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE))
+
+
 def _parse_single_statement(sql: str, dialect: str) -> exp.Expr:
     try:
         parsed = sqlglot.parse(sql, dialect=dialect)
@@ -90,8 +96,18 @@ def _reject_forbidden_nodes(tree: exp.Expr) -> None:
         if keyword:
             raise UnsafeQueryError(f"Instrução não permitida: {keyword}. {READ_ONLY_HINT}")
 
-        if isinstance(node, exp.Anonymous) and node.name.lower() in FORBIDDEN_FUNCTIONS:
-            raise UnsafeQueryError(f"Função não permitida: {node.name.lower()}.")
+        function_name = _function_name(node)
+        if function_name in FORBIDDEN_FUNCTIONS:
+            raise UnsafeQueryError(f"Função não permitida: {function_name}.")
+
+
+def _function_name(node: exp.Expr) -> str | None:
+    # Unknown functions are Anonymous; known ones are typed nodes (exp.Upper...) named by sql_name.
+    if isinstance(node, exp.Anonymous):
+        return node.name.lower()
+    if isinstance(node, exp.Func):
+        return node.sql_name().lower()
+    return None
 
 
 def _forbidden_keyword(node: exp.Expr) -> str | None:
@@ -109,7 +125,6 @@ def _check_table_references(
 ) -> None:
     tables = {name.lower() for name in allowed_tables}
     schemas = {name.lower() for name in allowed_schemas}
-    cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
 
     for table in tree.find_all(exp.Table):
         # FROM pragma_table_info(...), json_each(...), generate_series(...): a function, not a name.
@@ -128,12 +143,28 @@ def _check_table_references(
                 f"(prefixos aceitos: {', '.join(sorted(allowed_schemas))})."
             )
         name = table.name.lower()
-        if name in tables or (name in cte_names and not table.db):
+        if name in tables or (not table.db and name in _ctes_in_scope(table)):
             continue
         raise UnsafeQueryError(
             f"Tabela não permitida: {table.name}. "
             f"Tabelas disponíveis: {', '.join(sorted(allowed_tables))}."
         )
+
+
+def _ctes_in_scope(table: exp.Table) -> set[str]:
+    """CTE names visible from this table: only WITH clauses of its enclosing queries count.
+
+    A CTE defined inside a sibling subquery is not visible here, and SQLite would resolve the
+    name to the real table instead (e.g. FROM secret ... IN (WITH secret AS ...)).
+    """
+    names: set[str] = set()
+    node = table.parent
+    while node is not None:
+        for value in node.args.values():
+            if isinstance(value, exp.With):
+                names.update(cte.alias_or_name.lower() for cte in value.expressions)
+        node = node.parent
+    return names
 
 
 def _is_literal_json_function(node: exp.Expr) -> bool:

@@ -1,8 +1,10 @@
 """Shared fixtures that keep tests independent of the developer's environment and .env."""
 
+import socket
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -25,6 +27,8 @@ SETTINGS_ENV_VARS = (
     "DATABRICKS_HTTP_PATH",
     "DATABRICKS_TOKEN",
 )
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 SAMPLE_MOVIES = [
     (1, "Avatar", 2022),
@@ -54,6 +58,17 @@ def block_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError(f"Network access is disabled in tests: {request.method} {request.url}")
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
+
+    # Socket-level guard as well: covers any client (async httpx, other SDKs), loopback excepted.
+    original_connect = socket.socket.connect
+
+    def guarded_connect(self: socket.socket, address: Any) -> None:
+        host = address[0] if isinstance(address, tuple) else address
+        if host in LOOPBACK_HOSTS:
+            return original_connect(self, address)
+        raise RuntimeError(f"Network access is disabled in tests: {address!r}")
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
 
 
 @pytest.fixture

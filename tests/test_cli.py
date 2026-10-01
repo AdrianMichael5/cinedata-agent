@@ -178,3 +178,17 @@ class TestModelsCommand:
 
         assert result.exit_code == 0
         assert "Nenhum modelo da LLM_MODELS" in result.output
+
+
+class TestInvalidSettings:
+    @pytest.mark.parametrize("command", [["sql", "SELECT 1"], ["quota"], ["models"]])
+    def test_invalid_env_value_shows_field_without_echoing_it(self, monkeypatch, command):
+        monkeypatch.setenv("MAX_ROWS", "valor-secreto-invalido")
+
+        result = runner.invoke(app, command)
+
+        assert result.exit_code == 1
+        assert "Configuração inválida" in result.output
+        assert "MAX_ROWS" in result.output
+        assert "valor-secreto-invalido" not in result.output
+        assert "Traceback" not in result.output

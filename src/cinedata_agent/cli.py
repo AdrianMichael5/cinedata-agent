@@ -4,11 +4,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cinedata_agent.config import get_settings
+from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
 from cinedata_agent.formatting import result_summary, result_table
@@ -45,6 +46,18 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(code=1)
 
 
+def _load_settings() -> Settings:
+    """Read settings; on invalid values name the variables but never echo what was typed."""
+    try:
+        return get_settings()
+    except ValidationError as error:
+        names = sorted({str(issue["loc"][0]).upper() for issue in error.errors() if issue["loc"]})
+        _fail(
+            "Configuração inválida no .env ou nas variáveis de ambiente: "
+            f"{', '.join(names)}. Corrija o valor e tente de novo."
+        )
+
+
 def _not_implemented(command: str) -> None:
     """Warn that a command is still a stub and exit with a non-zero status."""
     err_console.print(f"[yellow]Comando '{command}' ainda não implementado.[/yellow]")
@@ -62,8 +75,9 @@ def ask(
 def sql(
     query: Annotated[str, typer.Argument(help="Instrução SELECT ou WITH.")],
 ) -> None:
+    settings = _load_settings()
     try:
-        result = get_database(get_settings()).run_query(query)
+        result = get_database(settings).run_query(query)
     except (DatabaseError, NotImplementedError) as error:
         _fail(str(error))
 
@@ -73,9 +87,10 @@ def sql(
 
 @app.command(help="Mostra o uso da cota diária do OpenRouter (não gasta requisições).")
 def quota() -> None:
+    settings = _load_settings()
     try:
         with make_http_client() as client:
-            info = get_quota(get_settings(), client=client)
+            info = get_quota(settings, client=client)
     except OpenRouterError as error:
         _fail(str(error))
 
@@ -92,9 +107,10 @@ def quota() -> None:
 
 @app.command(help="Lista os modelos gratuitos com suporte a tools (não gasta requisições).")
 def models() -> None:
+    settings = _load_settings()
     try:
         with make_http_client() as client:
-            report = list_free_tool_models(get_settings(), client=client)
+            report = list_free_tool_models(settings, client=client)
     except OpenRouterError as error:
         _fail(str(error))
 

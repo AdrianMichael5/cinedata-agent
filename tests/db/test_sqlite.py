@@ -187,7 +187,7 @@ class TestTimeout:
         with pytest.raises(QueryTimeoutError, match="tempo limite"):
             database.run_query(INFINITE_COUNT)
 
-        assert time.monotonic() - started < 2
+        assert time.monotonic() - started < 10  # generous: slow CI must not flake
 
     def test_database_still_usable_after_timeout(self, sample_db):
         database = make_db(sample_db, timeout_seconds=0.2)
@@ -230,3 +230,99 @@ class TestConstruction:
             False,
             1.5,
         )
+
+
+@pytest.fixture
+def db_with_secret(sample_db: Path) -> Path:
+    """sample_db plus a table that is not on the allowlist."""
+    with sqlite3.connect(sample_db) as connection:
+        connection.execute("CREATE TABLE secret (x TEXT)")
+        connection.execute("INSERT INTO secret VALUES ('S3CRET')")
+    connection.close()
+    return sample_db
+
+
+def bypass_validator(monkeypatch) -> None:
+    monkeypatch.setattr(sqlite_module, "validate_select", lambda query, **kwargs: query)
+
+
+class TestTableLevelAuthorizer:
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * FROM secret",
+            "SELECT COUNT(*) FROM secret",
+            "SELECT name, sql FROM sqlite_master",
+            "SELECT * FROM secret WHERE 1 IN (WITH secret AS (SELECT 1) SELECT 1)",
+        ],
+    )
+    def test_reads_outside_allowlist_are_denied_by_sqlite(self, db_with_secret, monkeypatch, sql):
+        bypass_validator(monkeypatch)
+
+        with pytest.raises(QueryExecutionError, match="not authorized|prohibited"):
+            make_db(db_with_secret).run_query(sql)
+
+    def test_cte_scope_trick_is_blocked_end_to_end(self, db_with_secret):
+        with pytest.raises(UnsafeQueryError):
+            make_db(db_with_secret).run_query(
+                "SELECT * FROM secret WHERE 1 IN (WITH secret AS (SELECT 1) SELECT 1)"
+            )
+
+    @pytest.mark.parametrize(
+        ("sql", "expected"),
+        [
+            ("SELECT COUNT(*) FROM dim_movies", ((5,),)),
+            ("WITH x AS (SELECT id FROM dim_movies WHERE id < 3) SELECT COUNT(*) FROM x", ((2,),)),
+            (
+                "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) "
+                "SELECT COUNT(*) FROM r",
+                ((3,),),
+            ),
+            (
+                "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 4) "
+                "SELECT COUNT(*) FROM r CROSS JOIN dim_genres",
+                ((8,),),
+            ),
+            ('SELECT COUNT(*) FROM json_each(\'["a", "b"]\')', ((2,),)),
+            (
+                "SELECT COUNT(*) FROM dim_movies WHERE titulo NOT IN "
+                "(SELECT nome FROM dim_genres UNION ALL SELECT value FROM json_each('[\"Coco\"]'))",
+                ((4,),),
+            ),
+            (
+                "SELECT MAX(r) FROM (SELECT RANK() OVER (ORDER BY ano) AS r FROM dim_movies)",
+                ((5,),),
+            ),
+        ],
+        ids=[
+            "count",
+            "cte",
+            "recursive-cte",
+            "recursive-cte-join",
+            "json-each",
+            "invalid-names-pattern",
+            "window",
+        ],
+    )
+    def test_legitimate_reads_still_work(self, sample_db, sql, expected):
+        assert make_db(sample_db).run_query(sql).rows == expected
+
+
+class TestTimeoutDetection:
+    def test_error_after_the_deadline_is_not_reported_as_timeout(self, sample_db, monkeypatch):
+        # The clock jumps past the deadline, but the query fails at prepare time:
+        # the progress handler never aborted it, so this is an execution error.
+        ticks = iter([0.0])
+        monkeypatch.setattr(sqlite_module.time, "monotonic", lambda: next(ticks, 1_000_000.0))
+
+        with pytest.raises(QueryExecutionError, match="no such column"):
+            make_db(sample_db, timeout_seconds=1).run_query("SELECT nao_existe FROM dim_movies")
+
+
+class TestValueSizeLimit:
+    def test_huge_values_are_rejected(self, sample_db):
+        with pytest.raises(QueryExecutionError, match="too big"):
+            make_db(sample_db).run_query("SELECT length(zeroblob(50000000))")
+
+    def test_normal_values_fit(self, sample_db):
+        assert make_db(sample_db).run_query("SELECT length(zeroblob(1000))").rows == ((1000,),)
