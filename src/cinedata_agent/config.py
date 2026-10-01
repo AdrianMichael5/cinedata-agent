@@ -1,0 +1,80 @@
+"""Application settings loaded from environment variables and an optional .env file."""
+
+from datetime import date
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+DEFAULT_LLM_MODELS: tuple[str, ...] = (
+    "nvidia/nemotron-3.5-lightning:free",
+    "z-ai/glm-5.2:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "openrouter/free",
+)
+
+DbBackend = Literal["sqlite", "databricks"]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+
+class Settings(BaseSettings):
+    """Immutable runtime configuration. Works with defaults only (no .env required)."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        frozen=True,
+    )
+
+    openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    llm_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_LLM_MODELS), min_length=1
+    )
+
+    db_backend: DbBackend = "sqlite"
+    db_path: Path = Path("data/cinerocket.db")
+    query_timeout_seconds: int = Field(default=30, gt=0)
+    max_rows: int = Field(default=200, gt=0)
+
+    max_llm_calls_per_question: int = Field(default=3, gt=0)
+    cache_dir: Path = Path(".cache")
+    reference_date_override: date | None = Field(default=None, validation_alias="REFERENCE_DATE")
+    log_level: LogLevel = "INFO"
+
+    databricks_server_hostname: str = ""
+    databricks_http_path: str = ""
+    databricks_token: SecretStr = SecretStr("")
+
+    @field_validator("llm_models", mode="before")
+    @classmethod
+    def _split_models(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("reference_date_override", mode="before")
+    @classmethod
+    def _blank_date_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_log_level(cls, value: Any) -> Any:
+        return value.upper() if isinstance(value, str) else value
+
+    @property
+    def reference_date(self) -> date:
+        """Date used for relative windows such as "last N years"; today when not configured."""
+        return self.reference_date_override or date.today()
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the process-wide settings, read once from the environment and .env."""
+    return Settings()

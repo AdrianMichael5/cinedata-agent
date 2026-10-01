@@ -1,0 +1,27 @@
+# Segredos
+.env
+.env.*
+!.env.example
+
+# Dados (581 MB) e material de referência
+data/
+*.db
+*.db-journal
+docs/referencia/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# Cache do agente e ferramentas locais
+.cache/
+.vscode/
+Thumbs.db
+.DS_Store
