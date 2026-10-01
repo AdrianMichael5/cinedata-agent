@@ -1,5 +1,6 @@
 """Read-only SQLite backend: validation, time limit, row limit and an authorizer allowlist."""
 
+import logging
 import sqlite3
 import time
 from collections.abc import Callable
@@ -12,12 +13,18 @@ from cinedata_agent.db.errors import (
     QueryExecutionError,
     QueryTimeoutError,
 )
-from cinedata_agent.db.schema import SQLITE_ALLOWED_SCHEMAS, SQLITE_ALLOWED_TABLES
+from cinedata_agent.db.schema import (
+    SQLITE_ALLOWED_SCHEMAS,
+    SQLITE_ALLOWED_TABLES,
+    expand_macros,
+)
 from cinedata_agent.db.validator import (
     LITERAL_TABLE_FUNCTIONS,
     defined_cte_names,
     validate_select,
 )
+
+logger = logging.getLogger(__name__)
 
 # How many SQLite VM instructions run between two deadline checks.
 PROGRESS_HANDLER_STEPS = 1_000
@@ -63,9 +70,9 @@ class SQLiteDatabase:
         self.allowed_schemas = allowed_schemas
 
     def run_query(self, sql: str) -> QueryResult:
-        """Validate and run one SELECT, returning at most max_rows rows."""
+        """Expand macros, validate and run one SELECT, returning at most max_rows rows."""
         normalized = validate_select(
-            sql,
+            expand_macros(sql),
             dialect=self.dialect,
             allowed_tables=self.allowed_tables,
             allowed_schemas=self.allowed_schemas,
@@ -75,6 +82,7 @@ class SQLiteDatabase:
             self.allowed_schemas,
             defined_cte_names(normalized, dialect=self.dialect),
         )
+        logger.info("run_query SQL: %s", normalized)
         started = time.perf_counter()
         deadline = _Deadline(self.timeout_seconds)
 
@@ -98,6 +106,7 @@ class SQLiteDatabase:
             rows=tuple(tuple(row) for row in rows[: self.max_rows]),
             truncated=len(rows) > self.max_rows,
             elapsed_ms=(time.perf_counter() - started) * 1000,
+            sql=normalized,
         )
 
     def _connect(self) -> sqlite3.Connection:

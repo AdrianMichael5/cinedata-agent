@@ -1,5 +1,6 @@
 import dataclasses
 import hashlib
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -50,9 +51,9 @@ class TestValidQuery:
 
     def test_accepts_trailing_semicolon_and_joins(self, sample_db):
         sql = """
-            SELECT g.nome, COUNT(*) AS filmes
+            SELECT g.nome_genero, COUNT(*) AS filmes
             FROM bridge_movie_genre mg JOIN dim_genres g ON g.id = mg.genre_id
-            GROUP BY g.nome ORDER BY g.nome;
+            GROUP BY g.nome_genero ORDER BY g.nome_genero;
         """
 
         result = make_db(sample_db).run_query(sql)
@@ -285,8 +286,8 @@ class TestTableLevelAuthorizer:
             ),
             ('SELECT COUNT(*) FROM json_each(\'["a", "b"]\')', ((2,),)),
             (
-                "SELECT COUNT(*) FROM dim_movies WHERE titulo NOT IN "
-                "(SELECT nome FROM dim_genres UNION ALL SELECT value FROM json_each('[\"Coco\"]'))",
+                "SELECT COUNT(*) FROM dim_movies WHERE titulo NOT IN (SELECT nome_genero "
+                "FROM dim_genres UNION ALL SELECT value FROM json_each('[\"Coco\"]'))",
                 ((4,),),
             ),
             (
@@ -326,3 +327,40 @@ class TestValueSizeLimit:
 
     def test_normal_values_fit(self, sample_db):
         assert make_db(sample_db).run_query("SELECT length(zeroblob(1000))").rows == ((1000,),)
+
+
+class TestMacrosAndExecutedSql:
+    MACRO_SQL = (
+        "SELECT titulo FROM dim_movies WHERE titulo NOT IN {{NOMES_INVALIDOS}} ORDER BY id LIMIT 2"
+    )
+
+    def test_expands_macro_before_validating_and_running(self, sample_db):
+        result = make_db(sample_db).run_query(self.MACRO_SQL)
+
+        assert result.rows == (("Avatar",), ("Barbie",))
+
+    def test_result_keeps_the_expanded_sql(self, sample_db):
+        result = make_db(sample_db).run_query(self.MACRO_SQL)
+
+        assert "{{" not in result.sql
+        assert "json_each" in result.sql.lower()  # the validator upper-cases functions
+        assert "dim_movies" in result.sql
+
+    def test_log_records_the_expanded_sql(self, sample_db, caplog):
+        caplog.set_level(logging.INFO, logger="cinedata_agent.db.sqlite")
+
+        make_db(sample_db).run_query(self.MACRO_SQL)
+
+        assert "json_each" in caplog.text.lower()
+        assert "{{NOMES_INVALIDOS}}" not in caplog.text
+
+    def test_unknown_macro_never_reaches_the_database(self, sample_db, monkeypatch):
+        database = make_db(sample_db)
+
+        def fail_connect(*args, **kwargs):
+            raise AssertionError("sqlite3.connect must not be called")
+
+        monkeypatch.setattr(sqlite_module.sqlite3, "connect", fail_connect)
+
+        with pytest.raises(UnsafeQueryError, match="NOMES_INVALIDOS"):
+            database.run_query("SELECT * FROM dim_people WHERE nome_pessoa NOT IN {{X}}")

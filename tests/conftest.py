@@ -80,7 +80,7 @@ def sample_db(tmp_path: Path) -> Path:
         connection.executescript(
             """
             CREATE TABLE dim_movies (id INTEGER PRIMARY KEY, titulo TEXT NOT NULL, ano INTEGER);
-            CREATE TABLE dim_genres (id INTEGER PRIMARY KEY, nome TEXT NOT NULL);
+            CREATE TABLE dim_genres (id INTEGER PRIMARY KEY, nome_genero TEXT NOT NULL);
             CREATE TABLE bridge_movie_genre (movie_id INTEGER, genre_id INTEGER);
             INSERT INTO dim_genres VALUES (1, 'Drama'), (2, 'Animation');
             INSERT INTO bridge_movie_genre VALUES (1, 1), (3, 2), (4, 1);

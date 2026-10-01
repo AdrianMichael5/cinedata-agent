@@ -16,6 +16,8 @@ class QueryResult:
     rows: tuple[tuple[Any, ...], ...]
     truncated: bool
     elapsed_ms: float
+    # The SQL that actually ran: macros expanded, validated and normalized.
+    sql: str = ""
 
 
 @runtime_checkable
