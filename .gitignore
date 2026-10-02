@@ -24,6 +24,9 @@ dist/
 # Cache do agente, log de requisições e ferramentas locais
 .cache/
 logs/
+
+# Execuções da avaliação (o eval/results/latest.md é versionado)
+eval/results/*.json
 .vscode/
 Thumbs.db
 .DS_Store
