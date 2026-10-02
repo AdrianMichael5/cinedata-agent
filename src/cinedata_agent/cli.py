@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cinedata_agent.agent import Agent
+from cinedata_agent.agent import Agent, SqlRecord
 from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
@@ -115,16 +115,21 @@ def ask(
         markup=False,
     )
     if show_sql:
-        _print_sql(answer.sql_executed)
+        _print_sql(answer.sql_log)
 
 
-def _print_sql(queries: list[str]) -> None:
-    if not queries:
+def _print_sql(records: list[SqlRecord]) -> None:
+    """Print each query as it ran (macros expanded); rejected ones carry the reason."""
+    if not records:
         console.print("Nenhuma SQL executada.", style="dim")
         return
-    for position, query in enumerate(queries, start=1):
-        console.print(f"\nSQL {position}:", style="bold")
-        console.print(query, markup=False, highlight=False, soft_wrap=True)
+    for position, record in enumerate(records, start=1):
+        if record.rejection is None:
+            console.print(f"\nSQL {position}:", style="bold")
+        else:
+            console.print(f"\nSQL {position} (rejeitada):", style="bold red")
+            console.print(f"Motivo: {record.rejection}", style="red", markup=False)
+        console.print(record.sql, markup=False, highlight=False, soft_wrap=True)
 
 
 @app.command(help="Executa uma consulta SQL somente leitura no banco.")

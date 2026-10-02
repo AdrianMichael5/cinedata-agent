@@ -28,6 +28,22 @@ class QuotaExhaustedError(OpenRouterError):
         self.reset_at = reset_at
 
 
+class RequestBudgetExceededError(OpenRouterError):
+    """MAX_REQUESTS_PER_QUESTION reached: nothing else is sent for this question."""
+
+    def __init__(self, used: int, reasons: Sequence[tuple[str, str]]) -> None:
+        self.used = used
+        self.reasons = tuple(reasons)
+        message = (
+            "Limite de requisições ao OpenRouter por pergunta atingido "
+            f"(MAX_REQUESTS_PER_QUESTION): {used} requisição(ões) usada(s) sem resposta final."
+        )
+        if self.reasons:
+            details = "; ".join(f"{model}: {reason}" for model, reason in self.reasons)
+            message += f" Falhas: {details}."
+        super().__init__(message)
+
+
 class AllModelsFailedError(OpenRouterError):
     """Every model in LLM_MODELS failed with a retryable error; keeps one reason per attempt."""
 

@@ -6,7 +6,7 @@ import pytest
 from fakes import FAKE_MODEL, FakeLLM, text_message, tool_call_message, tool_calls_message
 from openai.types.chat import ChatCompletionMessage
 
-from cinedata_agent.agent import Agent, AgentAnswer
+from cinedata_agent.agent import Agent, AgentAnswer, SqlRecord
 from cinedata_agent.config import Settings
 from cinedata_agent.db.base import QueryResult
 from cinedata_agent.db.errors import QueryTimeoutError
@@ -67,7 +67,9 @@ class SpyDatabase:
         self.queries.append(sql)
         if self.error is not None:
             raise self.error
-        return QueryResult(columns=("total",), rows=((7,),), truncated=False, elapsed_ms=1.0)
+        return QueryResult(
+            columns=("total",), rows=((7,),), truncated=False, elapsed_ms=1.0, sql=sql
+        )
 
 
 class TestHappyPath:
@@ -145,7 +147,65 @@ class TestRunSqlTool:
         assert len(spy.queries) == 1
         assert "{{" not in spy.queries[0]
         assert "json_each" in spy.queries[0]
-        assert answer.sql_executed == [sql]
+        assert answer.sql_executed == spy.queries
+
+
+class TestSqlRecords:
+    def test_records_the_sql_that_actually_ran(self, db):
+        answer, _ = ask(
+            db, [tool_call_message("select titulo\nfrom dim_movies -- todos"), text_message("Ok.")]
+        )
+
+        assert answer.sql_executed == ["SELECT titulo FROM dim_movies"]
+        assert answer.sql_executed == [answer.last_result.sql]
+        assert answer.sql_log == [SqlRecord(sql="SELECT titulo FROM dim_movies", rejection=None)]
+
+    def test_records_expanded_macros(self, db):
+        sql = "SELECT nome_genero FROM dim_genres WHERE nome_genero NOT IN {{NOMES_INVALIDOS}}"
+
+        answer, _ = ask(db, [tool_call_message(sql), text_message("Nenhum.")])
+
+        [executed] = answer.sql_executed
+        assert "{{" not in executed
+        assert "json_each" in executed.lower()
+
+    def test_rejected_sql_is_logged_expanded_with_the_reason(self, db):
+        bad = "DELETE FROM dim_movies WHERE titulo NOT IN {{NOMES_INVALIDOS}}"
+
+        answer, _ = ask(
+            db, [tool_call_message(bad), tool_call_message(COUNT_SQL), text_message("5 filmes.")]
+        )
+
+        rejected, executed = answer.sql_log
+        assert rejected.rejection is not None
+        assert "{{" not in rejected.sql and "json_each" in rejected.sql
+        assert rejected.sql.startswith("DELETE FROM dim_movies")
+        assert executed == SqlRecord(sql=COUNT_SQL, rejection=None)
+        assert answer.sql_executed == [COUNT_SQL]
+
+    def test_sql_error_reason_is_kept(self, db):
+        answer, _ = ask(
+            db, [tool_call_message("SELECT nome FROM dim_movies"), text_message("Falhou.")]
+        )
+
+        [record] = answer.sql_log
+        assert record.sql == "SELECT nome FROM dim_movies"
+        assert record.rejection is not None and "nome" in record.rejection
+        assert answer.sql_executed == []
+
+    def test_unknown_macro_is_logged_as_written(self, db):
+        sql = "SELECT 1 WHERE 'a' NOT IN {{OUTRA}}"
+
+        answer, _ = ask(db, [tool_call_message(sql), text_message("Ok.")])
+
+        [record] = answer.sql_log
+        assert record.sql == sql
+        assert record.rejection is not None and "{{OUTRA}}" in record.rejection
+
+    def test_sql_block_fallback_is_logged(self, db):
+        answer, _ = ask(db, [text_message(f"```sql\n{COUNT_SQL}\n```"), text_message("5 filmes.")])
+
+        assert answer.sql_log == [SqlRecord(sql=COUNT_SQL, rejection=None)]
 
     def test_several_tool_calls_in_one_response_all_run(self, db):
         answer, llm = ask(
@@ -323,6 +383,23 @@ class TestBudget:
         assert answer.llm_calls == 3
         assert llm.requests_sent == 3
         assert len(llm.script) == 1
+
+    def test_remaining_request_budget_is_passed_on_each_call(self, db):
+        script = [tool_call_message(COUNT_SQL), tool_call_message(TITLES_SQL), text_message("5.")]
+
+        _, llm = ask(db, script, max_requests_per_question=6)
+
+        assert llm.budgets == [6, 5, 4]
+
+    def test_spent_request_budget_with_a_result_returns_the_python_answer(self, db):
+        script = [tool_call_message(COUNT_SQL), text_message("nunca chamado")]
+
+        answer, llm = ask(db, script, max_requests_per_question=1)
+
+        assert llm.budgets == [1, 0]
+        assert llm.requests_sent == 1
+        assert "MAX_REQUESTS_PER_QUESTION" in answer.text
+        assert "\ntotal\n5" in answer.text
 
     def test_budget_comes_from_settings(self, db):
         script = [tool_call_message(COUNT_SQL) for _ in range(3)]

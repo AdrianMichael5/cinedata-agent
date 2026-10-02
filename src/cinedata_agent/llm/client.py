@@ -23,6 +23,7 @@ from cinedata_agent.llm.errors import (
     OpenRouterAPIError,
     PaymentRequiredError,
     QuotaExhaustedError,
+    RequestBudgetExceededError,
 )
 from cinedata_agent.llm.openrouter_account import INVALID_KEY_MESSAGE, next_quota_reset
 
@@ -97,10 +98,18 @@ class LLMClient:
         self,
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
+        max_requests: int | None = None,
     ) -> LLMResponse:
-        """Ask each model in order until one answers; stop at once on key, balance or quota."""
+        """Ask each model in order until one answers; stop at once on key, balance or quota.
+
+        max_requests caps the requests this call may send (the question's remaining budget).
+        """
         attempts: list[Attempt] = []
         for model in self._models:
+            if max_requests is not None and len(attempts) >= max_requests:
+                raise RequestBudgetExceededError(
+                    used=len(attempts), reasons=[(a.requested_model, a.outcome) for a in attempts]
+                )
             attempt, message = self._try_model(model, messages, tools)
             attempts.append(attempt)
             if message is not None:

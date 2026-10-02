@@ -15,6 +15,7 @@ from cinedata_agent.llm.errors import (
     OpenRouterAPIError,
     PaymentRequiredError,
     QuotaExhaustedError,
+    RequestBudgetExceededError,
 )
 
 FAKE_KEY = "sk-or-v1-fake-key-for-client-tests"
@@ -575,6 +576,53 @@ class TestAllModelsFailed:
         for code in ("429", "404", "503"):
             assert code in message
         assert llm.requests_sent == 3
+
+
+class TestRequestBudget:
+    def test_stops_when_the_budget_is_spent_mid_fallback(self):
+        server = ScriptedOpenRouter({model: status(429, PROVIDER_429) for model in MODELS})
+        llm = make_client(server)
+
+        with pytest.raises(RequestBudgetExceededError) as caught:
+            llm.complete(MESSAGES, TOOLS, max_requests=2)
+
+        assert server.models_called == MODELS[:2]
+        assert llm.requests_sent == 2
+        assert caught.value.used == 2
+        assert [model for model, _ in caught.value.reasons] == MODELS[:2]
+        message = str(caught.value)
+        assert "2 requisição(ões)" in message
+        assert "MAX_REQUESTS_PER_QUESTION" in message
+        assert "HTTP 429" in message
+
+    def test_zero_budget_sends_nothing(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+        llm = make_client(server)
+
+        with pytest.raises(RequestBudgetExceededError):
+            llm.complete(MESSAGES, TOOLS, max_requests=0)
+
+        assert server.requests == []
+        assert llm.requests_sent == 0
+
+    def test_budget_is_not_an_error_when_a_model_answers_in_time(self):
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": status(429, PROVIDER_429),
+                "second/model:free": ok("second/model:free"),
+            }
+        )
+
+        response = make_client(server).complete(MESSAGES, TOOLS, max_requests=2)
+
+        assert response.model_used == "second/model:free"
+        assert len(response.attempts) == 2
+
+    def test_all_models_failed_wins_when_the_list_ends_first(self):
+        server = ScriptedOpenRouter({model: status(429, PROVIDER_429) for model in MODELS})
+
+        with pytest.raises(AllModelsFailedError):
+            make_client(server).complete(MESSAGES, TOOLS, max_requests=10)
 
 
 class TestRequestCounter:

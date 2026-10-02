@@ -62,6 +62,37 @@ class TestAskCommand:
         assert result.exit_code == 0
         assert COUNT_SQL in result.output
 
+    def test_show_sql_prints_the_expanded_sql(self, monkeypatch):
+        sql = "SELECT nome_genero FROM dim_genres WHERE nome_genero NOT IN {{NOMES_INVALIDOS}}"
+        self.use_fake_llm(monkeypatch, [tool_call_message(sql), text_message("Nenhum.")])
+
+        result = runner.invoke(app, ["ask", "Quais gêneros?", "--show-sql"])
+
+        assert result.exit_code == 0
+        assert "json_each" in result.output.lower()
+        assert "{{NOMES_INVALIDOS}}" not in result.output
+
+    def test_show_sql_marks_rejected_sql_with_the_reason(self, monkeypatch):
+        self.use_fake_llm(
+            monkeypatch,
+            [
+                tool_call_message("DELETE FROM dim_movies"),
+                tool_call_message(COUNT_SQL),
+                text_message("5 filmes."),
+            ],
+        )
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?", "--show-sql"])
+
+        assert result.exit_code == 0
+        output = " ".join(result.output.split())
+        assert "SQL 1 (rejeitada)" in output
+        assert "Motivo:" in output
+        assert "DELETE FROM dim_movies" in output
+        assert "SQL 2:" in output
+        assert COUNT_SQL in output
+        assert output.index("SQL 1 (rejeitada)") < output.index("SQL 2:")
+
     def test_show_sql_says_when_nothing_ran(self, monkeypatch):
         self.use_fake_llm(monkeypatch, [text_message("Fora do escopo.")])
 

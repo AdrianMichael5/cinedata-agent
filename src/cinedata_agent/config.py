@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     max_rows: int = Field(default=200, gt=0)
 
     max_llm_calls_per_question: int = Field(default=3, gt=0)
+    # HTTP requests to OpenRouter per question, fallback attempts included (failures count too).
+    max_requests_per_question: int = Field(default=6, gt=0)
     cache_dir: Path = Path(".cache")
     reference_date_override: date | None = Field(default=None, validation_alias="REFERENCE_DATE")
     log_level: LogLevel = "INFO"
@@ -53,9 +55,12 @@ class Settings(BaseSettings):
     @field_validator("llm_models", mode="before")
     @classmethod
     def _split_models(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        items = value.split(",") if isinstance(value, str) else value
+        if not isinstance(items, list | tuple):
+            return value
+        # A repeated model would be tried twice in one fallback pass, burning quota for nothing.
+        names = (item.strip() if isinstance(item, str) else item for item in items)
+        return list(dict.fromkeys(name for name in names if name))
 
     @field_validator("reference_date_override", mode="before")
     @classmethod

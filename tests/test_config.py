@@ -25,6 +25,7 @@ class TestDefaults:
         assert settings.query_timeout_seconds == 30
         assert settings.max_rows == 200
         assert settings.max_llm_calls_per_question == 3
+        assert settings.max_requests_per_question == 6
         assert settings.cache_dir == Path(".cache")
         assert settings.log_level == "INFO"
 
@@ -52,6 +53,23 @@ class TestDefaults:
 
         assert values == [",".join(DEFAULT_LLM_MODELS)]
 
+    def test_env_example_sets_the_request_cap(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+        assert "MAX_REQUESTS_PER_QUESTION=6" in lines
+
+    def test_request_cap_reads_from_env(self, monkeypatch):
+        monkeypatch.setenv("MAX_REQUESTS_PER_QUESTION", "9")
+
+        assert make_settings().max_requests_per_question == 9
+
+    @pytest.mark.parametrize("raw", ["0", "-1"])
+    def test_request_cap_must_be_positive(self, monkeypatch, raw):
+        monkeypatch.setenv("MAX_REQUESTS_PER_QUESTION", raw)
+
+        with pytest.raises(ValidationError):
+            make_settings()
+
 
 class TestLlmModels:
     def test_parses_comma_separated_list(self, monkeypatch):
@@ -63,6 +81,22 @@ class TestLlmModels:
         monkeypatch.setenv("LLM_MODELS", " a/model:free , ,b/model:free, ")
 
         assert make_settings().llm_models == ["a/model:free", "b/model:free"]
+
+    def test_drops_repeated_models_keeping_first_position(self, monkeypatch):
+        monkeypatch.setenv(
+            "LLM_MODELS", "b/model:free, a/model:free,,b/model:free , a/model:free,c"
+        )
+
+        assert make_settings().llm_models == ["b/model:free", "a/model:free", "c"]
+
+    def test_rejects_a_value_that_is_not_text_or_a_list(self):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, llm_models=42)
+
+    def test_drops_repeated_models_given_as_a_list(self):
+        settings = Settings(_env_file=None, llm_models=["x:free", " x:free ", "", "y:free"])
+
+        assert settings.llm_models == ["x:free", "y:free"]
 
     @pytest.mark.parametrize("raw", ["", " , ,"])
     def test_rejects_empty_list(self, monkeypatch, raw):

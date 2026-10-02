@@ -19,8 +19,8 @@ from cinedata_agent.config import Settings
 from cinedata_agent.db.base import Database, QueryResult
 from cinedata_agent.db.errors import QueryExecutionError, QueryTimeoutError, UnsafeQueryError
 from cinedata_agent.db.schema import expand_macros
-from cinedata_agent.llm.client import LLMResponse
-from cinedata_agent.llm.errors import AllModelsFailedError
+from cinedata_agent.llm.client import OK_OUTCOME, LLMResponse
+from cinedata_agent.llm.errors import AllModelsFailedError, RequestBudgetExceededError
 from cinedata_agent.prompts.builder import build_system_prompt
 from cinedata_agent.tools import (
     QUERY_ARGUMENT,
@@ -65,16 +65,28 @@ class ChatModel(Protocol):
         self,
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
+        max_requests: int | None = None,
     ) -> LLMResponse: ...
+
+
+@dataclass(frozen=True)
+class SqlRecord:
+    """One query sent to the database, macros expanded; rejection is None when it ran."""
+
+    sql: str
+    rejection: str | None = None
 
 
 @dataclass(frozen=True)
 class AgentAnswer:
     text: str
+    # The SQL that actually ran (QueryResult.sql), in order.
     sql_executed: list[str]
     model_used: str | None
     llm_calls: int
     last_result: QueryResult | None
+    # Every query attempted, rejected ones included, in order.
+    sql_log: list[SqlRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -83,18 +95,23 @@ class _Conversation:
 
     messages: list[ChatCompletionMessageParam]
     sql_executed: list[str] = field(default_factory=list)
+    sql_log: list[SqlRecord] = field(default_factory=list)
     last_result: QueryResult | None = None
     model_used: str | None = None
     llm_calls: int = 0
+    # HTTP requests sent for this question (fallback attempts included) and why they failed.
+    requests_used: int = 0
+    failures: list[tuple[str, str]] = field(default_factory=list)
 
 
 class Agent:
-    """Answers one question with at most MAX_LLM_CALLS_PER_QUESTION model calls."""
+    """Answers one question within MAX_LLM_CALLS_PER_QUESTION and MAX_REQUESTS_PER_QUESTION."""
 
     def __init__(self, settings: Settings, db: Database, llm: ChatModel) -> None:
         self._db = db
         self._llm = llm
         self._max_calls = settings.max_llm_calls_per_question
+        self._max_requests = settings.max_requests_per_question
         self._system_prompt = build_system_prompt(settings)
 
     def ask(self, question: str) -> AgentAnswer:
@@ -113,15 +130,14 @@ class Agent:
             if 0 < conversation.llm_calls == self._max_calls - 1:
                 _append_user_message(conversation.messages, LAST_CALL_NOTE)
             try:
-                response = self._llm.complete(conversation.messages, [RUN_SQL_TOOL])
-            except AllModelsFailedError as error:
-                # Key, balance and quota errors still propagate; a transient outage after a
-                # successful query should not throw that result away.
+                response = self._complete(conversation)
+            except (AllModelsFailedError, RequestBudgetExceededError) as error:
+                # Key, balance and quota errors still propagate; an outage or a spent request
+                # budget after a successful query should not throw that result away.
                 if conversation.last_result is None:
                     raise
-                logger.warning("LLM unavailable after a successful query: %s", error)
-                warning = f"Aviso: o LLM ficou indisponível antes de concluir a resposta ({error})"
-                return _answer(conversation, _fallback_text(conversation, warning))
+                logger.warning("LLM stopped after a successful query: %s", error)
+                return _answer(conversation, _fallback_text(conversation, _stop_warning(error)))
             conversation.llm_calls += 1
             conversation.model_used = response.model_used
             logger.info(
@@ -134,6 +150,27 @@ class Agent:
             if final_text is not None:
                 return _answer(conversation, final_text)
         return _answer(conversation, _fallback_text(conversation, _budget_warning(self._max_calls)))
+
+    def _complete(self, conversation: _Conversation) -> LLMResponse:
+        """One model call limited to the question's remaining request budget."""
+        remaining = self._max_requests - conversation.requests_used
+        try:
+            response = self._llm.complete(
+                conversation.messages, [RUN_SQL_TOOL], max_requests=remaining
+            )
+        except RequestBudgetExceededError as error:
+            # The client only knows this call; report the whole question.
+            raise RequestBudgetExceededError(
+                used=conversation.requests_used + error.used,
+                reasons=[*conversation.failures, *error.reasons],
+            ) from error
+        conversation.requests_used += len(response.attempts)
+        conversation.failures.extend(
+            (attempt.requested_model, attempt.outcome)
+            for attempt in response.attempts
+            if attempt.outcome != OK_OUTCOME
+        )
+        return response
 
     def _handle_message(
         self, conversation: _Conversation, message: ChatCompletionMessage
@@ -181,13 +218,24 @@ class Agent:
     def _execute(self, conversation: _Conversation, query: str) -> str:
         """Run one query; recoverable errors become text the model can read and fix."""
         try:
-            result = self._db.run_query(expand_macros(query))
+            expanded = expand_macros(query)
+        except UnsafeQueryError as error:
+            return _reject(conversation, query, error)
+        try:
+            result = self._db.run_query(expanded)
         except RECOVERABLE_QUERY_ERRORS as error:
-            logger.info("Query rejected (%s): %s", type(error).__name__, error)
-            return f"ERRO: {error}"
-        conversation.sql_executed.append(query)
+            return _reject(conversation, expanded, error)
+        executed = result.sql or expanded
+        conversation.sql_executed.append(executed)
+        conversation.sql_log.append(SqlRecord(sql=executed))
         conversation.last_result = result
         return format_tool_result(result)
+
+
+def _reject(conversation: _Conversation, sql: str, error: Exception) -> str:
+    logger.info("Query rejected (%s): %s", type(error).__name__, error)
+    conversation.sql_log.append(SqlRecord(sql=sql, rejection=str(error)))
+    return f"ERRO: {error}"
 
 
 def _unique_call_ids(calls: Sequence[ChatCompletionMessageToolCallUnion]) -> list[str]:
@@ -245,6 +293,12 @@ def _sql_block(text: str) -> str | None:
     return match.group("sql").strip() or None
 
 
+def _stop_warning(error: AllModelsFailedError | RequestBudgetExceededError) -> str:
+    if isinstance(error, RequestBudgetExceededError):
+        return f"Aviso: {error}"
+    return f"Aviso: o LLM ficou indisponível antes de concluir a resposta ({error})"
+
+
 def _budget_warning(max_calls: int) -> str:
     plural = "s" if max_calls != 1 else ""
     return (
@@ -267,6 +321,7 @@ def _answer(conversation: _Conversation, text: str) -> AgentAnswer:
     return AgentAnswer(
         text=text,
         sql_executed=list(conversation.sql_executed),
+        sql_log=list(conversation.sql_log),
         model_used=conversation.model_used,
         llm_calls=conversation.llm_calls,
         last_result=conversation.last_result,

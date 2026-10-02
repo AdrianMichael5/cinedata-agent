@@ -7,7 +7,8 @@ from typing import Any
 
 from openai.types.chat import ChatCompletionMessage
 
-from cinedata_agent.llm.client import LLMResponse
+from cinedata_agent.llm.client import Attempt, LLMResponse
+from cinedata_agent.llm.errors import RequestBudgetExceededError
 
 FAKE_MODEL = "fake/model:free"
 
@@ -52,12 +53,19 @@ class FakeLLM:
         self.model = model
         self.calls: list[list[dict[str, Any]]] = []
         self.tools: list[list[Any]] = []
+        self.budgets: list[int | None] = []
 
     @property
     def requests_sent(self) -> int:
         return len(self.calls)
 
-    def complete(self, messages: Sequence[Any], tools: Sequence[Any]) -> LLMResponse:
+    def complete(
+        self, messages: Sequence[Any], tools: Sequence[Any], max_requests: int | None = None
+    ) -> LLMResponse:
+        """One request per call, like LLMClient when the first model answers."""
+        self.budgets.append(max_requests)
+        if max_requests is not None and max_requests <= 0:
+            raise RequestBudgetExceededError(used=0, reasons=[])
         self.calls.append(copy.deepcopy(list(messages)))
         self.tools.append(list(tools))
         if not self.script:
@@ -65,6 +73,7 @@ class FakeLLM:
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
+        attempt = Attempt(self.model, self.model, 200, 0, "ok")
         return LLMResponse(
-            message=item, model_used=self.model, requested_model=self.model, attempts=()
+            message=item, model_used=self.model, requested_model=self.model, attempts=(attempt,)
         )
