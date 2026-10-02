@@ -3,7 +3,8 @@
 import json
 import logging
 import re
-from collections.abc import Sequence
+import uuid
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -53,6 +54,7 @@ LAST_CALL_NOTE = (
     "Esta é a sua última chamada: não chame run_sql de novo. Escreva agora a resposta final "
     "em português com os resultados que já tem, dizendo o que ficou faltando, se for o caso."
 )
+EMPTY_ANSWER_REASON = "resposta vazia"
 EMPTY_ANSWER_NUDGE = (
     "Sua resposta veio vazia. Chame a ferramenta run_sql ou escreva a resposta final em português."
 )
@@ -66,7 +68,17 @@ class ChatModel(Protocol):
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
         max_requests: int | None = None,
+        skip_models: Collection[str] = (),
+        question_id: str | None = None,
     ) -> LLMResponse: ...
+
+
+@dataclass(frozen=True)
+class RunStats:
+    """Progress of the current or last question, available even when ask() raised."""
+
+    model_used: str | None
+    llm_calls: int
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,8 @@ class _Conversation:
     """Mutable state of one question while the loop runs."""
 
     messages: list[ChatCompletionMessageParam]
+    # Shared by every request of this question in the request log.
+    question_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     sql_executed: list[str] = field(default_factory=list)
     sql_log: list[SqlRecord] = field(default_factory=list)
     last_result: QueryResult | None = None
@@ -102,17 +116,34 @@ class _Conversation:
     # HTTP requests sent for this question (fallback attempts included) and why they failed.
     requests_used: int = 0
     failures: list[tuple[str, str]] = field(default_factory=list)
+    # Models that gave an empty answer: not asked again for this question.
+    skip_models: set[str] = field(default_factory=set)
 
 
 class Agent:
     """Answers one question within MAX_LLM_CALLS_PER_QUESTION and MAX_REQUESTS_PER_QUESTION."""
 
-    def __init__(self, settings: Settings, db: Database, llm: ChatModel) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        llm: ChatModel,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         self._db = db
         self._llm = llm
         self._max_calls = settings.max_llm_calls_per_question
         self._max_requests = settings.max_requests_per_question
         self._system_prompt = build_system_prompt(settings)
+        self._progress = progress or _ignore_progress
+        self._conversation: _Conversation | None = None
+
+    @property
+    def last_run(self) -> RunStats:
+        """Calls and model of the current or last question, also after an error."""
+        if self._conversation is None:
+            return RunStats(model_used=None, llm_calls=0)
+        return RunStats(self._conversation.model_used, self._conversation.llm_calls)
 
     def ask(self, question: str) -> AgentAnswer:
         """Run the tool-calling loop; quota and key errors from the LLM propagate untouched."""
@@ -126,9 +157,12 @@ class Agent:
                 {"role": "user", "content": question},
             ]
         )
+        self._conversation = conversation
         while conversation.llm_calls < self._max_calls:
             if 0 < conversation.llm_calls == self._max_calls - 1:
                 _append_user_message(conversation.messages, LAST_CALL_NOTE)
+            if conversation.sql_log:
+                self._progress("Redigindo resposta…")
             try:
                 response = self._complete(conversation)
             except (AllModelsFailedError, RequestBudgetExceededError) as error:
@@ -136,7 +170,7 @@ class Agent:
                 # budget after a successful query should not throw that result away.
                 if conversation.last_result is None:
                     raise
-                logger.warning("LLM stopped after a successful query: %s", error)
+                logger.info("LLM stopped after a successful query: %s", error)
                 return _answer(conversation, _fallback_text(conversation, _stop_warning(error)))
             conversation.llm_calls += 1
             conversation.model_used = response.model_used
@@ -146,7 +180,7 @@ class Agent:
                 self._max_calls,
                 response.model_used,
             )
-            final_text = self._handle_message(conversation, response.message)
+            final_text = self._handle_message(conversation, response)
             if final_text is not None:
                 return _answer(conversation, final_text)
         return _answer(conversation, _fallback_text(conversation, _budget_warning(self._max_calls)))
@@ -156,7 +190,11 @@ class Agent:
         remaining = self._max_requests - conversation.requests_used
         try:
             response = self._llm.complete(
-                conversation.messages, [RUN_SQL_TOOL], max_requests=remaining
+                conversation.messages,
+                [RUN_SQL_TOOL],
+                max_requests=remaining,
+                skip_models=frozenset(conversation.skip_models),
+                question_id=conversation.question_id,
             )
         except RequestBudgetExceededError as error:
             # The client only knows this call; report the whole question.
@@ -172,10 +210,9 @@ class Agent:
         )
         return response
 
-    def _handle_message(
-        self, conversation: _Conversation, message: ChatCompletionMessage
-    ) -> str | None:
+    def _handle_message(self, conversation: _Conversation, response: LLMResponse) -> str | None:
         """Return the final answer text, or None when the loop must call the model again."""
+        message = response.message
         if message.tool_calls:
             call_ids = _unique_call_ids(message.tool_calls)
             conversation.messages.append(_assistant_tool_calls(message, call_ids))
@@ -191,8 +228,7 @@ class Agent:
 
         text = (message.content or "").strip()
         if not text:
-            _append_user_message(conversation.messages, EMPTY_ANSWER_NUDGE)
-            return None
+            return self._handle_empty_answer(conversation, response)
 
         sql = _sql_block(text) if not conversation.sql_executed else None
         if sql is None:
@@ -201,6 +237,18 @@ class Agent:
         outcome = self._execute(conversation, sql)
         conversation.messages.append({"role": "assistant", "content": text})
         _append_user_message(conversation.messages, FINAL_ANSWER_REQUEST.format(outcome=outcome))
+        return None
+
+    def _handle_empty_answer(
+        self, conversation: _Conversation, response: LLMResponse
+    ) -> str | None:
+        """An empty answer (or reasoning only) is a failure of that model for this question."""
+        conversation.skip_models.add(response.requested_model)
+        conversation.failures.append((response.requested_model, EMPTY_ANSWER_REASON))
+        if conversation.last_result is not None:
+            warning = f"Aviso: o modelo {response.model_used} devolveu uma resposta vazia."
+            return _fallback_text(conversation, warning)
+        _append_user_message(conversation.messages, EMPTY_ANSWER_NUDGE)
         return None
 
     def _run_tool_call(
@@ -217,6 +265,7 @@ class Agent:
 
     def _execute(self, conversation: _Conversation, query: str) -> str:
         """Run one query; recoverable errors become text the model can read and fix."""
+        self._progress("Executando SQL…")
         try:
             expanded = expand_macros(query)
         except UnsafeQueryError as error:
@@ -230,6 +279,10 @@ class Agent:
         conversation.sql_log.append(SqlRecord(sql=executed))
         conversation.last_result = result
         return format_tool_result(result)
+
+
+def _ignore_progress(_: str) -> None:
+    return None
 
 
 def _reject(conversation: _Conversation, sql: str, error: Exception) -> str:

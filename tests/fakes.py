@@ -2,7 +2,7 @@
 
 import copy
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 from openai.types.chat import ChatCompletionMessage
@@ -15,6 +15,13 @@ FAKE_MODEL = "fake/model:free"
 
 def text_message(content: str) -> ChatCompletionMessage:
     return ChatCompletionMessage.model_validate({"role": "assistant", "content": content})
+
+
+def reasoning_only_message(reasoning: str) -> ChatCompletionMessage:
+    """What some reasoning models send when they run out of tokens before the answer."""
+    return ChatCompletionMessage.model_validate(
+        {"role": "assistant", "content": None, "reasoning": reasoning}
+    )
 
 
 def tool_call_message(*queries: str, raw_arguments: str | None = None) -> ChatCompletionMessage:
@@ -54,16 +61,25 @@ class FakeLLM:
         self.calls: list[list[dict[str, Any]]] = []
         self.tools: list[list[Any]] = []
         self.budgets: list[int | None] = []
+        self.skipped: list[set[str]] = []
+        self.question_ids: list[str | None] = []
 
     @property
     def requests_sent(self) -> int:
         return len(self.calls)
 
     def complete(
-        self, messages: Sequence[Any], tools: Sequence[Any], max_requests: int | None = None
+        self,
+        messages: Sequence[Any],
+        tools: Sequence[Any],
+        max_requests: int | None = None,
+        skip_models: Collection[str] = (),
+        question_id: str | None = None,
     ) -> LLMResponse:
         """One request per call, like LLMClient when the first model answers."""
         self.budgets.append(max_requests)
+        self.skipped.append(set(skip_models))
+        self.question_ids.append(question_id)
         if max_requests is not None and max_requests <= 0:
             raise RequestBudgetExceededError(used=0, reasons=[])
         self.calls.append(copy.deepcopy(list(messages)))

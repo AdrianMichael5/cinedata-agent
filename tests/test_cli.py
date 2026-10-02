@@ -1,4 +1,6 @@
+import io
 import logging
+import sys
 from datetime import UTC, datetime
 from importlib import metadata
 
@@ -37,7 +39,7 @@ class TestAskCommand:
 
     def use_fake_llm(self, monkeypatch, script) -> FakeLLM:
         llm = FakeLLM(script)
-        monkeypatch.setattr(cli, "LLMClient", lambda settings: llm)
+        monkeypatch.setattr(cli, "LLMClient", lambda settings, **kwargs: llm)
         return llm
 
     def test_prints_answer_model_and_llm_calls(self, monkeypatch):
@@ -126,7 +128,50 @@ class TestAskCommand:
 
         assert result.exit_code == 1
         assert str(error) in " ".join(result.output.split())
+        assert "Chamadas ao LLM: 0 · Requisições ao OpenRouter: 1" in result.output
         assert llm.requests_sent == 1
+
+    def test_error_after_some_calls_reports_them_in_the_footer(self, monkeypatch):
+        failure = PaymentRequiredError("Saldo negativo (HTTP 402).")
+        self.use_fake_llm(monkeypatch, [tool_call_message(COUNT_SQL), failure])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 1
+        assert "Saldo negativo" in result.output
+        assert f"Modelo: {FAKE_MODEL} · Chamadas ao LLM: 1 · Requisições ao OpenRouter: 2" in (
+            result.output
+        )
+
+    def test_unexpected_error_is_reported_without_a_traceback(self, monkeypatch):
+        self.use_fake_llm(monkeypatch, [RuntimeError("falha interna simulada")])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 1
+        assert "Erro inesperado (RuntimeError): falha interna simulada" in result.output
+        assert "Requisições ao OpenRouter: 1" in result.output
+        assert "Traceback" not in result.output
+
+    def test_progress_messages_stay_out_of_the_output(self, monkeypatch):
+        self.use_fake_llm(monkeypatch, [tool_call_message(COUNT_SQL), text_message("5 filmes.")])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 0
+        assert "Executando SQL" not in result.output
+        assert "Redigindo resposta" not in result.output
+
+    def test_footer_is_printed_even_for_an_empty_answer(self, monkeypatch):
+        self.use_fake_llm(
+            monkeypatch, [tool_call_message(COUNT_SQL), text_message(""), text_message("x")]
+        )
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 0
+        assert "resposta vazia" in result.output
+        assert "Chamadas ao LLM: 2 · Requisições ao OpenRouter: 2" in result.output
 
     def test_missing_key_exits_before_any_request(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
@@ -144,6 +189,7 @@ class TestAskCommand:
 
         assert result.exit_code == 1
         assert "não encontrado" in result.output
+        assert "Requisições ao OpenRouter: 0" in result.output
         assert llm.requests_sent == 0
 
     def test_blank_question_exits_without_calling_the_llm(self, monkeypatch):
@@ -154,6 +200,29 @@ class TestAskCommand:
         assert result.exit_code == 1
         assert "vazia" in result.output
         assert llm.requests_sent == 0
+
+
+class TestUtf8Streams:
+    def test_cp1252_streams_are_switched_to_utf8(self, monkeypatch):
+        raw = io.BytesIO()
+        monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+        monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+
+        cli.ensure_utf8_streams()
+        sys.stdout.write("Top 1 ‑ Avatar 🎬")
+        sys.stdout.flush()
+
+        assert sys.stdout.encoding == "utf-8"
+        assert sys.stderr.encoding == "utf-8"
+        assert raw.getvalue().decode("utf-8") == "Top 1 ‑ Avatar 🎬"
+
+    def test_streams_without_reconfigure_are_left_alone(self, monkeypatch):
+        fake = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", fake)
+
+        cli.ensure_utf8_streams()
+
+        assert sys.stdout is fake
 
 
 @pytest.mark.parametrize("flag", ["--version", "-V"])

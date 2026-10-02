@@ -2,8 +2,9 @@
 
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import httpx2
@@ -26,6 +27,7 @@ from cinedata_agent.llm.errors import (
     RequestBudgetExceededError,
 )
 from cinedata_agent.llm.openrouter_account import INVALID_KEY_MESSAGE, next_quota_reset
+from cinedata_agent.llm.request_log import RequestLog, RequestRecord, now_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ RAW_BODY_LOG_LIMIT = 2000
 SERVER_MESSAGE_LIMIT = 200
 OK_OUTCOME = "ok"
 INVALID_RESPONSE = "resposta inválida do OpenRouter"
+FREE_SUFFIX = ":free"
 
 CAPACITY_METADATA_KEYS = ("provider_name", "raw")
 CAPACITY_KEY_MARKERS = ("upstream", "provider")
@@ -51,6 +54,35 @@ PAYMENT_REQUIRED_MESSAGE = (
     "O OpenRouter recusou a chamada por falta de saldo (HTTP 402). Modelos gratuitos não "
     "cobram: confira se o saldo da conta em openrouter.ai/settings/credits não está negativo."
 )
+
+Progress = Callable[[str], None]
+
+
+class ErrorKind(StrEnum):
+    """Why a request did not produce an answer; written to the request log as error_type."""
+
+    PROVIDER_CAPACITY = "provider_capacity"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    AUTHENTICATION = "authentication"
+    PAYMENT_REQUIRED = "payment_required"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    SERVER_ERROR = "server_error"
+    BAD_REQUEST = "bad_request"
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    INVALID_RESPONSE = "invalid_response"
+    EMBEDDED_ERROR = "embedded_error"
+    EMPTY_CHOICES = "empty_choices"
+    NO_MESSAGE = "no_message"
+
+
+TRANSPORT_REASONS: dict[ErrorKind, str] = {
+    ErrorKind.TIMEOUT: "tempo limite esgotado",
+    ErrorKind.CONNECTION: "falha de conexão",
+    ErrorKind.INVALID_RESPONSE: INVALID_RESPONSE,
+    ErrorKind.EMPTY_CHOICES: "resposta sem conteúdo (choices vazio)",
+    ErrorKind.NO_MESSAGE: "resposta sem mensagem (choices[0].message vazio)",
+}
 
 
 @dataclass(frozen=True)
@@ -72,10 +104,23 @@ class LLMResponse:
     attempts: tuple[Attempt, ...]
 
 
+@dataclass(frozen=True)
+class _RequestContext:
+    model: str
+    question_id: str | None
+    started: float
+
+
 class LLMClient:
     """Chat completions over LLM_MODELS, one request per model at most, never the same twice."""
 
-    def __init__(self, settings: Settings, http_client: httpx2.Client | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        http_client: httpx2.Client | None = None,
+        progress: Progress | None = None,
+        request_log: RequestLog | None = None,
+    ) -> None:
         key = settings.openrouter_api_key.get_secret_value().strip()
         if not key:
             raise AuthenticationError(INVALID_KEY_MESSAGE)
@@ -87,6 +132,8 @@ class LLMClient:
             timeout=REQUEST_TIMEOUT_SECONDS,
             http_client=http_client,
         )
+        self._progress = progress or _ignore_progress
+        self._request_log = request_log or RequestLog(settings.request_log_path)
         self._requests_sent = 0
 
     @property
@@ -99,18 +146,21 @@ class LLMClient:
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
         max_requests: int | None = None,
+        skip_models: Collection[str] = (),
+        question_id: str | None = None,
     ) -> LLMResponse:
         """Ask each model in order until one answers; stop at once on key, balance or quota.
 
-        max_requests caps the requests this call may send (the question's remaining budget).
+        max_requests caps the requests this call may send (the question's remaining budget);
+        skip_models are models that already failed this question (an empty answer, say).
         """
         attempts: list[Attempt] = []
-        for model in self._models:
+        for model in (name for name in self._models if name not in skip_models):
             if max_requests is not None and len(attempts) >= max_requests:
                 raise RequestBudgetExceededError(
                     used=len(attempts), reasons=[(a.requested_model, a.outcome) for a in attempts]
                 )
-            attempt, message = self._try_model(model, messages, tools)
+            attempt, message = self._try_model(model, messages, tools, question_id)
             attempts.append(attempt)
             if message is not None:
                 return LLMResponse(
@@ -126,9 +176,11 @@ class LLMClient:
         model: str,
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
+        question_id: str | None,
     ) -> tuple[Attempt, ChatCompletionMessage | None]:
         self._requests_sent += 1
-        started = time.perf_counter()
+        self._progress(f"Chamando {short_model_name(model)}…")
+        context = _RequestContext(model, question_id, time.perf_counter())
         try:
             completion = self._openai.chat.completions.create(
                 model=model,
@@ -138,76 +190,129 @@ class LLMClient:
                 temperature=0,
             )
         except openai.APIStatusError as error:
-            self._log(model, None, error.status_code, started)
-            reason = _classify_status_error(error, model)
-            return Attempt(model, None, error.status_code, _elapsed_ms(started), reason), None
+            kind = _status_error_kind(error)
+            self._record(context, None, error.status_code, kind)
+            reason = _status_error_outcome(kind, error, model)
+            return Attempt(model, None, error.status_code, _elapsed_ms(context), reason), None
         except openai.APIConnectionError as error:
-            self._log(model, None, None, started)
             timed_out = isinstance(error, openai.APITimeoutError)
-            reason = "tempo limite esgotado" if timed_out else "falha de conexão"
-            return Attempt(model, None, None, _elapsed_ms(started), reason), None
+            kind = ErrorKind.TIMEOUT if timed_out else ErrorKind.CONNECTION
+            return self._transport_failure(context, kind, status=None), None
         except (openai.OpenAIError, ValueError) as error:
             # Bodies the SDK cannot parse (empty, invalid JSON) surface here, not as status errors.
-            self._log(model, None, None, started)
             logger.debug("Unparseable response from %s: %s", model, type(error).__name__)
-            return Attempt(model, None, None, _elapsed_ms(started), INVALID_RESPONSE), None
-        return self._read_completion(model, completion, started)
+            return self._transport_failure(context, ErrorKind.INVALID_RESPONSE, status=None), None
+        return self._read_completion(context, completion)
 
     def _read_completion(
-        self, model: str, completion: object, started: float
+        self, context: _RequestContext, completion: object
     ) -> tuple[Attempt, ChatCompletionMessage | None]:
         # Non-JSON 200s (HTML from a gateway, a JSON list) come back as plain str/list objects.
         if not isinstance(completion, ChatCompletion):
-            self._log(model, None, 200, started)
-            return Attempt(model, None, 200, _elapsed_ms(started), INVALID_RESPONSE), None
+            return self._transport_failure(context, ErrorKind.INVALID_RESPONSE, status=200), None
 
         model_field: object = completion.model
         responded = model_field if isinstance(model_field, str) and model_field else None
-        self._log(model, responded, 200, started)
-        embedded = _embedded_error(completion)
         message = completion.choices[0].message if completion.choices else None
+        embedded = _embedded_error(completion)
         if embedded is not None:
+            kind: ErrorKind | None = ErrorKind.EMBEDDED_ERROR
             reason = embedded
         elif not completion.choices:
-            reason = "resposta sem conteúdo (choices vazio)"
+            kind, reason = ErrorKind.EMPTY_CHOICES, TRANSPORT_REASONS[ErrorKind.EMPTY_CHOICES]
         elif message is None:
-            reason = "resposta sem mensagem (choices[0].message vazio)"
+            kind, reason = ErrorKind.NO_MESSAGE, TRANSPORT_REASONS[ErrorKind.NO_MESSAGE]
         else:
-            return Attempt(model, responded, 200, _elapsed_ms(started), OK_OUTCOME), message
-        return Attempt(model, responded, 200, _elapsed_ms(started), reason), None
+            kind, reason = None, OK_OUTCOME
+        self._record(context, responded, 200, kind, usage=completion.usage)
+        attempt = Attempt(context.model, responded, 200, _elapsed_ms(context), reason)
+        return attempt, (message if kind is None else None)
 
-    def _log(
-        self, requested: str, responded: str | None, status: int | None, started: float
+    def _transport_failure(
+        self, context: _RequestContext, kind: ErrorKind, status: int | None
+    ) -> Attempt:
+        self._record(context, None, status, kind)
+        return Attempt(context.model, None, status, _elapsed_ms(context), TRANSPORT_REASONS[kind])
+
+    def _record(
+        self,
+        context: _RequestContext,
+        responded: str | None,
+        status: int | None,
+        kind: ErrorKind | None,
+        usage: Any = None,
     ) -> None:
+        """Log one request (never the key or the prompt) to the logger and the JSONL file."""
+        elapsed = _elapsed_ms(context)
         logger.info(
             "OpenRouter request #%d: requested=%s responded=%s status=%s elapsed=%dms",
             self._requests_sent,
-            requested,
+            context.model,
             responded or "-",
             status if status is not None else "no-response",
-            _elapsed_ms(started),
+            elapsed,
+        )
+        self._request_log.append(
+            RequestRecord(
+                timestamp=now_utc_iso(),
+                question_id=context.question_id,
+                requested_model=context.model,
+                responded_model=responded,
+                status=status,
+                latency_ms=elapsed,
+                prompt_tokens=_token_count(usage, "prompt_tokens"),
+                completion_tokens=_token_count(usage, "completion_tokens"),
+                error_type=kind.value if kind is not None else None,
+            )
         )
 
 
-def _classify_status_error(error: openai.APIStatusError, model: str) -> str:
-    """Return why the next model should be tried, or raise when no model can help."""
+def short_model_name(model: str) -> str:
+    """'nvidia/nemotron-3.5-lightning:free' -> 'nemotron-3.5-lightning' for progress messages."""
+    name = model.rsplit("/", 1)[-1].removesuffix(FREE_SUFFIX)
+    return model if not name or name == "free" else name
+
+
+def _ignore_progress(_: str) -> None:
+    return None
+
+
+def _status_error_kind(error: openai.APIStatusError) -> ErrorKind:
     code = error.status_code
     body = _error_body(error)
     message = str(body.get("message") or error.message)
-
     if code == 401:
-        raise AuthenticationError(INVALID_KEY_MESSAGE) from error
+        return ErrorKind.AUTHENTICATION
     if code == 402:
-        raise PaymentRequiredError(PAYMENT_REQUIRED_MESSAGE) from error
+        return ErrorKind.PAYMENT_REQUIRED
+    if code == 429:
+        capacity = _is_provider_capacity(body, message)
+        return ErrorKind.PROVIDER_CAPACITY if capacity else ErrorKind.QUOTA_EXHAUSTED
+    if code in (400, 404) and _is_model_unavailable(message):
+        return ErrorKind.MODEL_UNAVAILABLE
+    if code >= 500 or code == 408:
+        return ErrorKind.SERVER_ERROR
+    return ErrorKind.BAD_REQUEST
+
+
+def _status_error_outcome(kind: ErrorKind, error: openai.APIStatusError, model: str) -> str:
+    """Return why the next model should be tried, or raise when no model can help."""
+    code = error.status_code
     if code == 429:
         logger.debug("HTTP 429 body for %s: %s", model, error.response.text[:RAW_BODY_LOG_LIMIT])
-        if _is_provider_capacity(body, message):
-            return "HTTP 429: provider do modelo sem capacidade no momento"
+    if kind is ErrorKind.AUTHENTICATION:
+        raise AuthenticationError(INVALID_KEY_MESSAGE) from error
+    if kind is ErrorKind.PAYMENT_REQUIRED:
+        raise PaymentRequiredError(PAYMENT_REQUIRED_MESSAGE) from error
+    if kind is ErrorKind.QUOTA_EXHAUSTED:
         raise _quota_exhausted() from error
-    if code in (400, 404) and _is_model_unavailable(message):
+    if kind is ErrorKind.PROVIDER_CAPACITY:
+        return "HTTP 429: provider do modelo sem capacidade no momento"
+    if kind is ErrorKind.MODEL_UNAVAILABLE:
         return f"HTTP {code}: modelo indisponível ou sem suporte a tools"
-    if code >= 500 or code == 408:
+    if kind is ErrorKind.SERVER_ERROR:
         return f"HTTP {code}: falha temporária do servidor"
+    message = str(_error_body(error).get("message") or error.message)
     raise OpenRouterAPIError(
         f"O OpenRouter recusou a requisição para {model} com HTTP {code}: "
         f"{message[:SERVER_MESSAGE_LIMIT]}"
@@ -260,6 +365,11 @@ def _embedded_error(completion: ChatCompletion) -> str | None:
     return f"erro {error.get('code', '?')} no corpo de uma resposta 200: {message}"
 
 
+def _token_count(usage: Any, name: str) -> int | None:
+    value = getattr(usage, name, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _quota_exhausted() -> QuotaExhaustedError:
     reset = next_quota_reset()
     return QuotaExhaustedError(
@@ -269,5 +379,5 @@ def _quota_exhausted() -> QuotaExhaustedError:
     )
 
 
-def _elapsed_ms(started: float) -> int:
-    return round((time.perf_counter() - started) * 1000)
+def _elapsed_ms(context: _RequestContext) -> int:
+    return round((time.perf_counter() - context.started) * 1000)

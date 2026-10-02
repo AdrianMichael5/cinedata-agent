@@ -21,8 +21,9 @@ build/
 dist/
 *.egg-info/
 
-# Cache do agente e ferramentas locais
+# Cache do agente, log de requisições e ferramentas locais
 .cache/
+logs/
 .vscode/
 Thumbs.db
 .DS_Store

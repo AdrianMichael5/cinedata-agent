@@ -3,7 +3,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from fakes import FAKE_MODEL, FakeLLM, text_message, tool_call_message, tool_calls_message
+from fakes import (
+    FAKE_MODEL,
+    FakeLLM,
+    reasoning_only_message,
+    text_message,
+    tool_call_message,
+    tool_calls_message,
+)
 from openai.types.chat import ChatCompletionMessage
 
 from cinedata_agent.agent import Agent, AgentAnswer, SqlRecord
@@ -16,6 +23,7 @@ from cinedata_agent.llm.errors import (
     AuthenticationError,
     PaymentRequiredError,
     QuotaExhaustedError,
+    RequestBudgetExceededError,
 )
 from cinedata_agent.prompts.builder import build_system_prompt
 from cinedata_agent.tools import (
@@ -469,6 +477,82 @@ class TestBudget:
                 not (a == "user" and b == "user") for a, b in zip(roles, roles[1:], strict=False)
             ), roles
         assert "última chamada" in llm.calls[2][-1]["content"]
+
+
+class TestEmptyFinalAnswer:
+    @pytest.mark.parametrize(
+        "empty",
+        [text_message(""), text_message("  \n "), reasoning_only_message("pensando...")],
+        ids=["empty", "blank", "reasoning_only"],
+    )
+    def test_empty_answer_after_a_result_returns_the_python_answer(self, db, empty):
+        answer, llm = ask(db, [tool_call_message(COUNT_SQL), empty, text_message("nunca")])
+
+        assert answer.llm_calls == 2
+        assert llm.requests_sent == 2
+        assert "resposta vazia" in answer.text
+        assert FAKE_MODEL in answer.text
+        assert "\ntotal\n5" in answer.text
+
+    def test_empty_answer_without_a_result_skips_that_model_next_time(self, db):
+        answer, llm = ask(db, [reasoning_only_message("hmm"), text_message("Fora do escopo.")])
+
+        assert answer.text == "Fora do escopo."
+        assert llm.skipped == [set(), {FAKE_MODEL}]
+        assert answer.llm_calls == 2
+
+    def test_skipped_models_accumulate(self, db):
+        script = [text_message(""), text_message(""), text_message("Ok.")]
+
+        _, llm = ask(db, script)
+
+        assert llm.skipped[0] == set()
+        assert llm.skipped[2] == {FAKE_MODEL}
+
+    def test_empty_answers_count_as_failures_in_the_budget_error(self, db):
+        llm = FakeLLM([text_message(""), RequestBudgetExceededError(used=0, reasons=[])])
+
+        with pytest.raises(RequestBudgetExceededError) as caught:
+            Agent(make_settings(), db, llm).ask(QUESTION)
+
+        assert (FAKE_MODEL, "resposta vazia") in caught.value.reasons
+
+
+class TestProgressAndQuestionId:
+    def test_reports_sql_and_answer_phases(self, db):
+        events: list[str] = []
+        llm = FakeLLM([tool_call_message(COUNT_SQL), text_message("5 filmes.")])
+
+        Agent(make_settings(), db, llm, progress=events.append).ask(QUESTION)
+
+        assert events == ["Executando SQL…", "Redigindo resposta…"]
+
+    def test_question_id_is_stable_within_a_question_and_new_for_the_next(self, db):
+        llm = FakeLLM([tool_call_message(COUNT_SQL), text_message("5."), text_message("Ok.")])
+        agent = Agent(make_settings(), db, llm)
+
+        agent.ask(QUESTION)
+        agent.ask("Outra pergunta?")
+
+        first, second, third = llm.question_ids
+        assert first and first == second
+        assert third and third != first
+
+    def test_last_run_before_any_question_is_empty(self, db):
+        agent = Agent(make_settings(), db, FakeLLM([]))
+
+        assert agent.last_run.llm_calls == 0
+        assert agent.last_run.model_used is None
+
+    def test_last_run_reports_calls_and_model_even_after_an_error(self, db):
+        llm = FakeLLM([tool_call_message(COUNT_SQL), PaymentRequiredError("saldo")])
+        agent = Agent(make_settings(), db, llm)
+
+        with pytest.raises(PaymentRequiredError):
+            agent.ask(QUESTION)
+
+        assert agent.last_run.llm_calls == 1
+        assert agent.last_run.model_used == FAKE_MODEL
 
 
 class TestToolCallIds:

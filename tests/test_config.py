@@ -58,6 +58,19 @@ class TestDefaults:
 
         assert "MAX_REQUESTS_PER_QUESTION=6" in lines
 
+    def test_request_log_defaults_to_logs_folder(self):
+        assert make_settings().request_log_path == Path("logs/requests.jsonl")
+
+    def test_env_example_sets_the_request_log(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+        assert "REQUEST_LOG_PATH=logs/requests.jsonl" in lines
+
+    def test_logs_folder_is_ignored_by_git(self):
+        gitignore = ENV_EXAMPLE.with_name(".gitignore").read_text(encoding="utf-8").splitlines()
+
+        assert "logs/" in gitignore
+
     def test_request_cap_reads_from_env(self, monkeypatch):
         monkeypatch.setenv("MAX_REQUESTS_PER_QUESTION", "9")
 

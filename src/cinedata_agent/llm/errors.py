@@ -49,5 +49,11 @@ class AllModelsFailedError(OpenRouterError):
 
     def __init__(self, reasons: Sequence[tuple[str, str]]) -> None:
         self.reasons = tuple(reasons)
+        if not self.reasons:
+            super().__init__(
+                "Nenhum modelo da LLM_MODELS sobrou para esta chamada: todos já falharam "
+                "nesta pergunta (por exemplo, com resposta vazia)."
+            )
+            return
         details = "; ".join(f"{model}: {reason}" for model, reason in self.reasons)
         super().__init__(f"Nenhum modelo da LLM_MODELS respondeu. {details}.")

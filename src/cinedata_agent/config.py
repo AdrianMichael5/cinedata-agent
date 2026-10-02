@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # HTTP requests to OpenRouter per question, fallback attempts included (failures count too).
     max_requests_per_question: int = Field(default=6, gt=0)
     cache_dir: Path = Path(".cache")
+    # One JSON line per OpenRouter request (no key, no prompt), to compare with the quota.
+    request_log_path: Path = Path("logs/requests.jsonl")
     reference_date_override: date | None = Field(default=None, validation_alias="REFERENCE_DATE")
     log_level: LogLevel = "INFO"
 

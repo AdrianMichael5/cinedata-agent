@@ -1,6 +1,7 @@
 """Command-line interface for the CineData agent."""
 
 import logging
+import sys
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from typing import Annotated, NoReturn
@@ -11,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cinedata_agent.agent import Agent, SqlRecord
+from cinedata_agent.agent import Agent, RunStats, SqlRecord
 from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
@@ -26,6 +27,7 @@ from cinedata_agent.llm.openrouter_account import (
     make_http_client,
     next_quota_reset,
 )
+from cinedata_agent.llm.request_log import read_records, summarize
 
 app = typer.Typer(
     help="Agente Text-to-SQL do catálogo CineData.",
@@ -35,6 +37,7 @@ app = typer.Typer(
 # emoji=False: model ids such as "a/model:free: ..." would otherwise render ":free:" as an emoji.
 console = Console(emoji=False)
 err_console = Console(stderr=True, emoji=False)
+logger = logging.getLogger(__name__)
 
 DISTRIBUTION = "cinedata-agent"
 
@@ -84,8 +87,23 @@ def main(
         ),
     ] = False,
 ) -> None:
+    ensure_utf8_streams()
     # sqlglot warns "contains unsupported syntax" on valid SQLite; the validator reports errors.
     logging.getLogger("sqlglot").setLevel(logging.ERROR)
+
+
+def ensure_utf8_streams() -> None:
+    """Switch stdout/stderr to UTF-8 when they are not.
+
+    Windows pipes and some consoles default to cp1252, which cannot encode characters models
+    often write ("‑" U+2011, typographic quotes, emojis): rich then raised UnicodeEncodeError
+    before printing anything, so the answer and the footer were lost.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if callable(reconfigure) and encoding != "utf8":
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 @app.command(help="Responde a uma pergunta sobre o catálogo em linguagem natural.")
@@ -98,24 +116,79 @@ def ask(
     settings = _load_settings()
     if not question.strip():
         _fail("A pergunta está vazia: escreva o que quer saber sobre o catálogo.")
+    llm: LLMClient | None = None
+    agent: Agent | None = None
     try:
-        # Database first: a missing file must fail before any request is spent.
-        database = get_database(settings)
-        llm = LLMClient(settings)
-        answer = Agent(settings, database, llm).ask(question)
+        # Transient spinner on stderr: progress never mixes with the answer on stdout.
+        with err_console.status("Preparando…") as status:
+
+            def progress(text: str) -> None:
+                status.update(text)
+
+            # Database first: a missing file must fail before any request is spent.
+            database = get_database(settings)
+            llm = LLMClient(settings, progress=progress)
+            agent = Agent(settings, database, llm, progress=progress)
+            answer = agent.ask(question)
     except (DatabaseError, NotImplementedError, OpenRouterError) as error:
-        _fail(str(error))
+        _fail_with_footer(str(error), llm, agent)
+    except Exception as error:
+        # Last line of defense: a clear message and the footer, never a silent exit.
+        logger.debug("Unexpected error in ask", exc_info=True)
+        _fail_with_footer(f"Erro inesperado ({type(error).__name__}): {error}", llm, agent)
 
     console.print(answer.text, markup=False, highlight=False)
     console.print()
     console.print(
-        f"Modelo: {answer.model_used or '-'} · Chamadas ao LLM: {answer.llm_calls} · "
-        f"Requisições ao OpenRouter: {llm.requests_sent}",
-        style="dim",
-        markup=False,
+        _footer(answer.model_used, answer.llm_calls, llm.requests_sent), style="dim", markup=False
     )
     if show_sql:
         _print_sql(answer.sql_log)
+
+
+def _footer(model: str | None, llm_calls: int, requests_sent: int) -> str:
+    return (
+        f"Modelo: {model or '-'} · Chamadas ao LLM: {llm_calls} · "
+        f"Requisições ao OpenRouter: {requests_sent}"
+    )
+
+
+def _fail_with_footer(message: str, llm: LLMClient | None, agent: Agent | None) -> NoReturn:
+    """Print the error and what was spent so far, then exit 1."""
+    stats = agent.last_run if agent is not None else RunStats(model_used=None, llm_calls=0)
+    requests_sent = llm.requests_sent if llm is not None else 0
+    err_console.print(message, style="red", markup=False)
+    err_console.print(
+        _footer(stats.model_used, stats.llm_calls, requests_sent), style="dim", markup=False
+    )
+    raise typer.Exit(code=1)
+
+
+@app.command(help="Soma as requisições ao OpenRouter do log local (não gasta requisições).")
+def requests(
+    today: Annotated[
+        bool, typer.Option("--today", help="Só o dia atual da cota (UTC, renova às 21h).")
+    ] = False,
+) -> None:
+    settings = _load_settings()
+    records = read_records(settings.request_log_path)
+    if not records:
+        console.print(f"Nenhuma requisição registrada em {settings.request_log_path}.")
+        return
+    day = datetime.now(UTC).date() if today else None
+    summary = summarize(records, day)
+    title = (
+        f"Requisições ao OpenRouter em {day.isoformat()} (dia da cota em UTC)"
+        if day is not None
+        else "Requisições ao OpenRouter (log inteiro)"
+    )
+    table = Table(title=title, box=None)
+    table.add_column("Status HTTP")
+    table.add_column("Requisições", justify="right")
+    for status, count in summary.by_status.items():
+        table.add_row(status, str(count))
+    console.print(table)
+    console.print(f"Total: {summary.total}", style="bold")
 
 
 def _print_sql(records: list[SqlRecord]) -> None:

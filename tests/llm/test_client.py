@@ -1,6 +1,7 @@
 import json
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import httpx2
@@ -623,6 +624,163 @@ class TestRequestBudget:
 
         with pytest.raises(AllModelsFailedError):
             make_client(server).complete(MESSAGES, TOOLS, max_requests=10)
+
+
+class TestSkipModels:
+    def test_skipped_models_are_not_requested(self):
+        server = ScriptedOpenRouter({"second/model:free": ok("second/model:free")})
+        llm = make_client(server)
+
+        response = llm.complete(MESSAGES, TOOLS, skip_models={"first/model:free"})
+
+        assert server.models_called == ["second/model:free"]
+        assert response.requested_model == "second/model:free"
+
+    def test_skipping_every_model_sends_nothing(self):
+        server = ScriptedOpenRouter({})
+        llm = make_client(server)
+
+        with pytest.raises(AllModelsFailedError):
+            llm.complete(MESSAGES, TOOLS, skip_models=set(MODELS))
+
+        assert llm.requests_sent == 0
+
+
+class TestProgress:
+    def test_announces_each_model_tried(self):
+        events: list[str] = []
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": status(429, PROVIDER_429),
+                "second/model:free": ok("second/model:free"),
+            }
+        )
+        settings = Settings(_env_file=None, openrouter_api_key=FAKE_KEY, llm_models=MODELS)
+        http_client = httpx2.Client(transport=httpx2.MockTransport(server))
+        llm = LLMClient(settings, http_client=http_client, progress=events.append)
+
+        llm.complete(MESSAGES, TOOLS)
+
+        assert events == ["Chamando model…", "Chamando model…"]
+
+    @pytest.mark.parametrize(
+        ("model", "label"),
+        [
+            ("nvidia/nemotron-3.5-lightning:free", "nemotron-3.5-lightning"),
+            ("openrouter/free", "openrouter/free"),
+            ("plain-model", "plain-model"),
+        ],
+    )
+    def test_short_model_labels(self, model, label):
+        assert client_module.short_model_name(model) == label
+
+
+class TestRequestLog:
+    def read_log(self, tmp_path) -> list[dict[str, Any]]:
+        path = tmp_path / "logs" / "requests.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_writes_one_line_per_request(self, tmp_path):
+        body = completion_body("second/model:free")
+        body["usage"] = {"prompt_tokens": 1200, "completion_tokens": 85, "total_tokens": 1285}
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": status(429, PROVIDER_429),
+                "second/model:free": httpx2.Response(200, json=body),
+            }
+        )
+
+        make_client(server).complete(MESSAGES, TOOLS, question_id="q-123")
+
+        first, second = self.read_log(tmp_path)
+        assert first["question_id"] == "q-123"
+        assert first["requested_model"] == "first/model:free"
+        assert first["responded_model"] is None
+        assert first["status"] == 429
+        assert first["error_type"] == "provider_capacity"
+        assert first["prompt_tokens"] is None
+        assert second["status"] == 200
+        assert second["responded_model"] == "second/model:free"
+        assert second["error_type"] is None
+        assert (second["prompt_tokens"], second["completion_tokens"]) == (1200, 85)
+        assert isinstance(second["latency_ms"], int)
+        assert datetime.fromisoformat(second["timestamp"]).tzinfo is not None
+
+    @pytest.mark.parametrize(
+        ("response", "error_type", "expected_error"),
+        [
+            (status(429, QUOTA_429), "quota_exhausted", QuotaExhaustedError),
+            (
+                status(401, error_body("User not found.", 401)),
+                "authentication",
+                AuthenticationError,
+            ),
+            (status(402, error_body("No credits", 402)), "payment_required", PaymentRequiredError),
+            (status(400, error_body("bad", 400)), "bad_request", OpenRouterAPIError),
+        ],
+        ids=["quota", "auth", "payment", "bad_request"],
+    )
+    def test_fatal_errors_are_logged_before_raising(
+        self, tmp_path, response, error_type, expected_error
+    ):
+        server = ScriptedOpenRouter({"first/model:free": response})
+
+        with pytest.raises(expected_error):
+            make_client(server).complete(MESSAGES, TOOLS)
+
+        [line] = self.read_log(tmp_path)
+        assert line["error_type"] == error_type
+        assert line["status"] == response.status_code
+
+    @pytest.mark.parametrize(
+        ("outcome", "error_type"),
+        [
+            (httpx2.ReadTimeout("slow"), "timeout"),
+            (httpx2.ConnectError("refused"), "connection"),
+            (status(503, error_body("down", 503)), "server_error"),
+            (status(404, NO_TOOLS_404), "model_unavailable"),
+            (
+                httpx2.Response(200, text="<html>", headers={"content-type": "text/html"}),
+                "invalid_response",
+            ),
+        ],
+        ids=["timeout", "connection", "server_error", "model_unavailable", "invalid_response"],
+    )
+    def test_retryable_failures_are_typed(self, tmp_path, outcome, error_type):
+        server = ScriptedOpenRouter(
+            {"first/model:free": outcome, "second/model:free": ok("second/model:free")}
+        )
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        first, _ = self.read_log(tmp_path)
+        assert first["error_type"] == error_type
+
+    def test_never_stores_the_key_or_the_prompt(self, tmp_path):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS, question_id="q-1")
+
+        raw = (tmp_path / "logs" / "requests.jsonl").read_text(encoding="utf-8")
+        assert FAKE_KEY not in raw
+        assert "Quantos filmes" not in raw
+        assert "run_sql" not in raw
+        assert "Existem 5 filmes" not in raw
+
+    def test_unwritable_log_does_not_break_the_request(self, tmp_path):
+        (tmp_path / "blocked").mkdir()
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+        settings = Settings(
+            _env_file=None,
+            openrouter_api_key=FAKE_KEY,
+            llm_models=MODELS,
+            request_log_path=tmp_path / "blocked",
+        )
+        http_client = httpx2.Client(transport=httpx2.MockTransport(server))
+
+        response = LLMClient(settings, http_client=http_client).complete(MESSAGES, TOOLS)
+
+        assert response.model_used == "first/model:free"
 
 
 class TestRequestCounter:
