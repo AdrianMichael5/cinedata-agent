@@ -153,6 +153,25 @@ class TestSuccess:
         assert payload["tool_choice"] == "auto"
         assert payload["temperature"] == 0
 
+    def test_sends_max_tokens_from_settings(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+        settings = Settings(
+            _env_file=None, openrouter_api_key=FAKE_KEY, llm_models=MODELS, max_output_tokens=400
+        )
+        http_client = httpx2.Client(transport=httpx2.MockTransport(server))
+        llm = LLMClient(settings, http_client=http_client)
+
+        llm.complete(MESSAGES, TOOLS)
+
+        assert server.requests[0]["max_tokens"] == 400
+
+    def test_default_max_tokens_is_1500(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        assert server.requests[0]["max_tokens"] == 1500
+
     def test_sends_key_as_bearer_to_the_configured_base_url(self):
         seen: list[httpx2.Request] = []
 

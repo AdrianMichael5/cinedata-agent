@@ -85,6 +85,8 @@ class QuestionOutcome:
     answer_text: str
     error: str | None
     reference_checks: dict[str, bool | None]
+    # Set when the agent could not finish normally (budget spent, degenerate answer discarded).
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,7 @@ class _AgentRun:
     answer_text: str
     error: str | None
     from_cache: bool
+    warning: str | None = None
 
 
 def evaluation_settings(**overrides: Any) -> Settings:
@@ -266,6 +269,7 @@ def _evaluate(
         answer_text=run.answer_text,
         error=run.error or reference_error,
         reference_checks=checks,
+        warning=run.warning,
     )
 
 
@@ -338,6 +342,7 @@ def _ask_agent(
         answer_text=answer.text,
         error=None,
         from_cache=False,
+        warning=answer.warning,
     )
 
 

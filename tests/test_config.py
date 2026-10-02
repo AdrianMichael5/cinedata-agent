@@ -26,6 +26,7 @@ class TestDefaults:
         assert settings.max_rows == 200
         assert settings.max_llm_calls_per_question == 3
         assert settings.max_requests_per_question == 6
+        assert settings.max_output_tokens == 1500
         assert settings.cache_dir == Path(".cache")
         assert settings.log_level == "INFO"
 
@@ -62,6 +63,11 @@ class TestDefaults:
         lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
 
         assert "MAX_REQUESTS_PER_QUESTION=6" in lines
+
+    def test_env_example_sets_the_output_token_cap(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+        assert "MAX_OUTPUT_TOKENS=1500" in lines
 
     def test_request_log_defaults_to_logs_folder(self):
         assert make_settings().request_log_path == Path("logs/requests.jsonl")
@@ -153,6 +159,7 @@ class TestValidation:
             ("QUERY_TIMEOUT_SECONDS", "0"),
             ("MAX_ROWS", "-1"),
             ("MAX_LLM_CALLS_PER_QUESTION", "0"),
+            ("MAX_OUTPUT_TOKENS", "0"),
             ("DB_BACKEND", "postgres"),
             ("LOG_LEVEL", "LOUD"),
         ],

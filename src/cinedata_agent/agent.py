@@ -58,6 +58,53 @@ EMPTY_ANSWER_REASON = "resposta vazia"
 EMPTY_ANSWER_NUDGE = (
     "Sua resposta veio vazia. Chame a ferramenta run_sql ou escreva a resposta final em português."
 )
+DISCARDED_ANSWER_PREFIX = "resposta do modelo descartada: "
+DEGENERATE_ANSWER_NUDGE = (
+    "A resposta anterior foi descartada por parecer degenerada (texto repetitivo ou raciocínio "
+    "vazado). Escreva agora a resposta final de novo, em português, direta e sem repetições, "
+    "usando os resultados que já tem."
+)
+
+# A model that runs out of useful content sometimes repeats a short fragment, leaks its
+# reasoning in English before the answer, or simply never stops writing.
+DEGENERATE_MAX_CHARS = 6000
+DEGENERATE_MIN_REPEATS = 20
+LEAKED_REASONING_MARKERS = ("I need to", "Let's", "The query returned", "We need")
+
+
+def is_degenerate(text: str) -> str | None:
+    """Why a model's final answer should be discarded, or None when it looks fine."""
+    stripped = text.strip()
+    if len(stripped) > DEGENERATE_MAX_CHARS:
+        return f"resposta com mais de {DEGENERATE_MAX_CHARS} caracteres"
+    marker = _leaked_reasoning_marker(stripped)
+    if marker is not None:
+        return f'raciocínio vazado no início da resposta ("{marker}")'
+    fragment = _repeated_fragment(stripped)
+    if fragment is not None:
+        return f'trecho "{fragment}" repetido {DEGENERATE_MIN_REPEATS} vezes ou mais seguidas'
+    return None
+
+
+def _leaked_reasoning_marker(text: str) -> str | None:
+    lowered = text.lower()
+    for marker in LEAKED_REASONING_MARKERS:
+        if lowered.startswith(marker.lower()):
+            return marker
+    return None
+
+
+def _repeated_fragment(text: str, min_repeats: int = DEGENERATE_MIN_REPEATS) -> str | None:
+    """A whitespace-separated token repeated min_repeats times or more in a row."""
+    tokens = text.split()
+    run_start = 0
+    for index in range(1, len(tokens) + 1):
+        if index < len(tokens) and tokens[index] == tokens[run_start]:
+            continue
+        if index - run_start >= min_repeats:
+            return tokens[run_start]
+        run_start = index
+    return None
 
 
 class ChatModel(Protocol):
@@ -122,6 +169,8 @@ class _Conversation:
     skip_models: set[str] = field(default_factory=set)
     # Set when the answer was built in Python because the model could not finish.
     warning: str | None = None
+    # A degenerate answer is retried with the next model at most once per question.
+    degenerate_retried: bool = False
 
 
 class Agent:
@@ -236,6 +285,9 @@ class Agent:
 
         sql = _sql_block(text) if not conversation.sql_executed else None
         if sql is None:
+            reason = is_degenerate(text)
+            if reason is not None:
+                return self._handle_degenerate_answer(conversation, response, reason)
             return text
         # Fallback for models that print SQL instead of calling the tool.
         outcome = self._execute(conversation, sql)
@@ -254,6 +306,23 @@ class Agent:
             return _fallback_text(conversation, warning)
         _append_user_message(conversation.messages, EMPTY_ANSWER_NUDGE)
         return None
+
+    def _handle_degenerate_answer(
+        self, conversation: _Conversation, response: LLMResponse, reason: str
+    ) -> str | None:
+        """Discard a degenerate final answer; retried once, then answered in Python."""
+        conversation.failures.append((response.requested_model, f"resposta degenerada: {reason}"))
+        can_retry = (
+            not conversation.degenerate_retried
+            and conversation.llm_calls < self._max_calls
+            and conversation.requests_used < self._max_requests
+        )
+        if can_retry:
+            conversation.degenerate_retried = True
+            conversation.skip_models.add(response.requested_model)
+            _append_user_message(conversation.messages, DEGENERATE_ANSWER_NUDGE)
+            return None
+        return _fallback_text(conversation, f"{DISCARDED_ANSWER_PREFIX}{reason}")
 
     def _run_tool_call(
         self, conversation: _Conversation, call: ChatCompletionMessageToolCallUnion

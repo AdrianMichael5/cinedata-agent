@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     max_llm_calls_per_question: int = Field(default=3, gt=0)
     # HTTP requests to OpenRouter per question, fallback attempts included (failures count too).
     max_requests_per_question: int = Field(default=6, gt=0)
+    # Caps a single model's reply: guards against degenerate output (repetition, leaked
+    # reasoning) that would otherwise run until the provider's own token limit.
+    max_output_tokens: int = Field(default=1500, gt=0)
     cache_dir: Path = Path(".cache")
     # One JSON line per OpenRouter request (no key, no prompt), to compare with the quota.
     request_log_path: Path = Path("logs/requests.jsonl")

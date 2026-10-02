@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 LATEST_MARKDOWN = "latest.md"
 TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 VALUE_LABELS = {True: "dentro de 1%", False: "fora de 1%", None: "não comparável"}
+WARNING_CELL_LIMIT = 60
 
 
 def summarize_run(run: EvalRun) -> dict[str, int]:
@@ -95,7 +96,8 @@ def print_plan(
 
 def print_run(run: EvalRun, console: Console) -> None:
     table = Table(title=f"Avaliação {run.status}")
-    for column in ("ID", "Aprovada", "Top 1", "Recall", "Bateu com", "Modelo", "Req.", "Tempo"):
+    columns = ("ID", "Aprovada", "Top 1", "Recall", "Bateu com", "Modelo", "Req.", "Tempo", "Aviso")
+    for column in columns:
         table.add_column(column)
     for item in run.questions:
         table.add_row(
@@ -107,6 +109,7 @@ def print_run(run: EvalRun, console: Console) -> None:
             Text(item.model or "-"),
             "cache" if item.from_cache else str(item.requests),
             f"{item.elapsed_s:.1f}s",
+            _warning_text(item),
         )
     console.print(table)
     summary = summarize_run(run)
@@ -135,13 +138,14 @@ def render_markdown(run: EvalRun) -> str:
         f"- Armadilhas evitadas: {_traps_line(summary)}",
         f"- Requisições ao OpenRouter: {summary['requests']} · do cache: {summary['from_cache']}",
         "",
-        "| ID | Aprovada | Top 1 | Recall | Bateu com | Modelo | Requisições | Tempo |",
-        "|---|---|---|---|---|---|---|---|",
+        "| ID | Aprovada | Top 1 | Recall | Bateu com | Modelo | Requisições | Tempo | Aviso |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     lines += [
         f"| {item.id} | {_yes(item.approved)} | {_yes(item.top1_ok)} | "
         f"{item.recall:.2f}@{item.k} | {_cell(_matched(item))} | {_cell(item.model or '-')} | "
-        f"{'cache' if item.from_cache else item.requests} | {item.elapsed_s:.1f}s |"
+        f"{'cache' if item.from_cache else item.requests} | {item.elapsed_s:.1f}s | "
+        f"{_cell(_warning_cell(item))} |"
         for item in run.questions
     ]
     for item in run.questions:
@@ -196,6 +200,19 @@ def _check(ok: bool | None) -> str:
 
 def _yes(flag: bool) -> str:
     return "sim" if flag else "não"
+
+
+def _warning_cell(item: QuestionOutcome) -> str:
+    if item.warning is None:
+        return "-"
+    if len(item.warning) <= WARNING_CELL_LIMIT:
+        return item.warning
+    return item.warning[: WARNING_CELL_LIMIT - 1] + "…"
+
+
+def _warning_text(item: QuestionOutcome) -> Text:
+    cell = _warning_cell(item)
+    return Text(cell, style="yellow") if item.warning else Text(cell)
 
 
 def _cell(text: str) -> str:

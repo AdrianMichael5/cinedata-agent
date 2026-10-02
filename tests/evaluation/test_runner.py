@@ -577,6 +577,114 @@ class TestOutputs:
         assert "Q01" in text
         assert "fake/model:free" in text
 
+    def test_markdown_and_table_show_the_warning_column_when_present(self):
+        item = QuestionOutcome(
+            id="Q07",
+            question="Pergunta com resposta degenerada",
+            approved=False,
+            has_trap=False,
+            value_check=None,
+            top1_ok=False,
+            recall=0.0,
+            k=0,
+            value_ok=None,
+            matched_role=None,
+            matched_label=None,
+            key_columns=[],
+            matched_columns=[],
+            model="m",
+            llm_calls=2,
+            requests=2,
+            elapsed_s=1.0,
+            from_cache=False,
+            sql_executed=[],
+            answer_text="Aviso: ... Segue o último resultado obtido, sem interpretação.",
+            error=None,
+            reference_checks={},
+            warning="resposta do modelo descartada: trecho repetido 20 vezes ou mais seguidas",
+        )
+        run = EvalRun(FIXED_NOW, FIXED_NOW, "2026-10-01", "completa", None, {}, [item])
+
+        markdown = render_markdown(run)
+
+        assert "Aviso" in markdown
+        assert "resposta do modelo descartada: trecho repetido" in markdown
+
+    def test_short_warning_is_not_truncated(self):
+        item = QuestionOutcome(
+            id="Q06",
+            question="q",
+            approved=True,
+            has_trap=False,
+            value_check=None,
+            top1_ok=True,
+            recall=1.0,
+            k=1,
+            value_ok=None,
+            matched_role="esperada",
+            matched_label="l",
+            key_columns=[],
+            matched_columns=[],
+            model="m",
+            llm_calls=1,
+            requests=1,
+            elapsed_s=0.1,
+            from_cache=False,
+            sql_executed=[],
+            answer_text="ok",
+            error=None,
+            reference_checks={},
+            warning="aviso curto",
+        )
+        run = EvalRun(FIXED_NOW, FIXED_NOW, "2026-10-01", "completa", None, {}, [item])
+
+        markdown = render_markdown(run)
+
+        assert "| aviso curto |" in markdown
+
+    def test_question_outcome_warning_defaults_to_none(self):
+        item = QuestionOutcome(
+            id="Q01",
+            question="q",
+            approved=True,
+            has_trap=False,
+            value_check=None,
+            top1_ok=True,
+            recall=1.0,
+            k=1,
+            value_ok=None,
+            matched_role="esperada",
+            matched_label="l",
+            key_columns=[],
+            matched_columns=[],
+            model="m",
+            llm_calls=1,
+            requests=1,
+            elapsed_s=0.1,
+            from_cache=False,
+            sql_executed=[],
+            answer_text="ok",
+            error=None,
+            reference_checks={},
+        )
+
+        assert item.warning is None
+
+    def test_degenerate_agent_answer_warning_reaches_the_report(self, harness):
+        degenerate = " ".join(["10,"] * 25)
+        harness.script = [
+            tool_call_message(RECENT_SQL),
+            text_message(degenerate),
+            text_message(degenerate),
+        ]
+
+        harness.run(ids="Q01")
+
+        q01 = outcome(harness.report, "Q01")
+        assert q01["warning"] is not None
+        assert q01["warning"].startswith("resposta do modelo descartada:")
+        assert "resposta do modelo descartada:" in harness.markdown
+
 
 class TestSettingsAndArguments:
     def test_reference_date_is_forced(self, monkeypatch):

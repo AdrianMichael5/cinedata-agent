@@ -13,7 +13,8 @@ from fakes import (
 )
 from openai.types.chat import ChatCompletionMessage
 
-from cinedata_agent.agent import Agent, AgentAnswer, SqlRecord
+from cinedata_agent.agent import Agent, AgentAnswer, SqlRecord, is_degenerate
+from cinedata_agent.cache import is_complete
 from cinedata_agent.config import Settings
 from cinedata_agent.db.base import QueryResult
 from cinedata_agent.db.errors import QueryTimeoutError
@@ -544,6 +545,99 @@ class TestEmptyFinalAnswer:
             Agent(make_settings(), db, llm).ask(QUESTION)
 
         assert (FAKE_MODEL, "resposta vazia") in caught.value.reasons
+
+
+class TestIsDegenerate:
+    def test_normal_answer_is_not_degenerate(self):
+        assert is_degenerate("O catálogo tem 5 filmes, liderado por Avatar.") is None
+
+    def test_text_over_6000_characters_is_degenerate(self):
+        reason = is_degenerate("x" * 6001)
+
+        assert reason is not None
+        assert "6000" in reason
+
+    def test_text_at_6000_characters_is_not_degenerate(self):
+        assert is_degenerate("x" * 6000) is None
+
+    @pytest.mark.parametrize("marker", ["I need to", "Let's", "The query returned", "We need"])
+    def test_leaked_reasoning_marker_at_the_start_is_degenerate(self, marker):
+        reason = is_degenerate(f"{marker} look at the results before answering in Portuguese.")
+
+        assert reason is not None
+        assert marker in reason
+
+    def test_leaked_reasoning_marker_in_the_middle_is_not_degenerate(self):
+        text = "O catálogo tem 5 filmes. We need mais contexto para responder melhor."
+
+        assert is_degenerate(text) is None
+
+    def test_repeated_fragment_20_times_or_more_is_degenerate(self):
+        reason = is_degenerate(" ".join(["10,"] * 25))
+
+        assert reason is not None
+        assert "10," in reason
+
+    def test_repeated_fragment_fewer_than_20_times_is_not_degenerate(self):
+        assert is_degenerate(" ".join(["10,"] * 19)) is None
+
+
+class TestDegenerateAnswer:
+    DEGENERATE_TEXT = " ".join(["10,"] * 25)
+
+    def test_retries_the_next_model_once_and_keeps_the_clean_answer(self, db):
+        answer, llm = ask(
+            db,
+            [
+                tool_call_message(COUNT_SQL),
+                text_message(self.DEGENERATE_TEXT),
+                text_message("O catálogo tem 5 filmes."),
+            ],
+        )
+
+        assert answer.text == "O catálogo tem 5 filmes."
+        assert answer.warning is None
+        assert llm.requests_sent == 3
+        assert llm.skipped[2] == {FAKE_MODEL}
+
+    def test_second_degenerate_answer_falls_back_to_python(self, db):
+        answer, llm = ask(
+            db,
+            [
+                tool_call_message(COUNT_SQL),
+                text_message(self.DEGENERATE_TEXT),
+                text_message(self.DEGENERATE_TEXT),
+            ],
+        )
+
+        assert llm.requests_sent == 3
+        assert answer.warning is not None
+        assert answer.warning.startswith("resposta do modelo descartada:")
+        assert "total" in answer.text
+        assert not is_complete(answer)
+
+    def test_no_calls_left_for_a_retry_falls_back_immediately(self, db):
+        answer, llm = ask(
+            db,
+            [tool_call_message(COUNT_SQL), text_message(self.DEGENERATE_TEXT)],
+            max_llm_calls_per_question=2,
+        )
+
+        assert llm.requests_sent == 2
+        assert answer.warning is not None
+        assert answer.warning.startswith("resposta do modelo descartada:")
+        assert "total" in answer.text
+
+    def test_no_request_budget_left_for_a_retry_falls_back_immediately(self, db):
+        answer, llm = ask(
+            db,
+            [tool_call_message(COUNT_SQL), text_message(self.DEGENERATE_TEXT)],
+            max_requests_per_question=2,
+        )
+
+        assert llm.requests_sent == 2
+        assert answer.warning is not None
+        assert answer.warning.startswith("resposta do modelo descartada:")
 
 
 class TestProgressAndQuestionId:

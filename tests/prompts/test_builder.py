@@ -138,6 +138,35 @@ class TestBusinessRules:
         assert "limitações" in lowered
 
 
+class TestOctoberCorrections:
+    """Rules added after the 2026-10-02 eval (Q02, Q03, Q06, Q07): currency, filter scope,
+    group counts, silent reasoning and a shorter answer format."""
+
+    def test_brl_columns_are_not_for_display_when_the_usd_filter_applies(self, prompt):
+        assert "nunca para exibir o valor absoluto" in prompt
+
+    def test_currency_example_uses_brl_for_an_average(self, prompt):
+        assert "AVG(lucro_brl)" in prompt
+
+    def test_minimum_filters_are_never_combined(self, prompt):
+        assert "nunca combine os três filtros numa mesma pergunta" in prompt
+
+    def test_review_filter_does_not_join_movie_reviews_outside_its_question(self, prompt):
+        assert "não junte `movie_reviews` se a pergunta não for sobre avaliações" in prompt
+
+    def test_group_averages_include_the_movie_count(self, prompt):
+        assert "inclua uma coluna com a quantidade de filmes do grupo" in prompt
+
+    def test_model_is_told_to_stay_silent_about_its_reasoning(self, prompt):
+        assert "Não descreva seu raciocínio" in prompt
+
+    def test_answer_never_ends_offering_more_help(self, prompt):
+        assert "Nunca termine oferecendo ajuda" in prompt
+
+    def test_answer_table_is_capped_at_ten_lines(self, prompt):
+        assert "até 10 linhas" in prompt
+
+
 class TestExamples:
     def test_has_five_examples(self, prompt):
         assert len(prompt_examples(prompt)) == 5

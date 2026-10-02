@@ -125,6 +125,7 @@ class LLMClient:
         if not key:
             raise AuthenticationError(INVALID_KEY_MESSAGE)
         self._models = tuple(settings.llm_models)
+        self._max_output_tokens = settings.max_output_tokens
         self._openai = OpenAI(
             base_url=settings.openrouter_base_url,
             api_key=key,
@@ -188,6 +189,7 @@ class LLMClient:
                 tools=list(tools),
                 tool_choice="auto",
                 temperature=0,
+                max_tokens=self._max_output_tokens,
             )
         except openai.APIStatusError as error:
             kind = _status_error_kind(error)
