@@ -37,7 +37,15 @@ def summarize_run(run: EvalRun) -> dict[str, int]:
         "failed_trap": sum(1 for item in failed if item.matched_role == "armadilha"),
         "failed_no_match": sum(1 for item in failed if item.matched_role != "armadilha"),
         "trap_questions": len(with_trap),
-        "traps_avoided": sum(1 for item in with_trap if item.matched_role != "armadilha"),
+        # A trap is avoided only by an approved answer; a failed answer that matches nothing
+        # says nothing about the trap, so it is "not comparable" and left out of the ratio.
+        "traps_avoided": sum(1 for item in with_trap if item.approved),
+        "trap_evaluable": sum(
+            1 for item in with_trap if item.approved or item.matched_role == "armadilha"
+        ),
+        "trap_not_comparable": sum(
+            1 for item in with_trap if not item.approved and item.matched_role != "armadilha"
+        ),
         "from_cache": sum(1 for item in questions if item.from_cache),
         "requests": sum(item.requests for item in questions),
         "errors": sum(1 for item in questions if item.error),
@@ -104,7 +112,7 @@ def print_run(run: EvalRun, console: Console) -> None:
     summary = summarize_run(run)
     console.print(
         f"Placar: {summary['approved']}/{summary['total']} aprovadas · armadilhas evitadas: "
-        f"{summary['traps_avoided']} de {summary['trap_questions']}",
+        f"{_traps_line(summary)}",
         style="bold",
     )
     if run.stop_reason:
@@ -124,7 +132,7 @@ def render_markdown(run: EvalRun) -> str:
         f"  - Aprovadas por alternativa válida: {summary['approved_alternative']}",
         f"  - Reprovadas por armadilha: {summary['failed_trap']}",
         f"  - Reprovadas sem correspondência: {summary['failed_no_match']}",
-        f"- Armadilhas evitadas: {summary['traps_avoided']} de {summary['trap_questions']}",
+        f"- Armadilhas evitadas: {_traps_line(summary)}",
         f"- Requisições ao OpenRouter: {summary['requests']} · do cache: {summary['from_cache']}",
         "",
         "| ID | Aprovada | Top 1 | Recall | Bateu com | Modelo | Requisições | Tempo |",
@@ -163,6 +171,13 @@ def _question_details(item: QuestionOutcome) -> list[str]:
     answer = item.answer_text.strip() or "(sem resposta)"
     lines += ["", "Resposta do agente:", "", *(f"> {line}" for line in answer.splitlines())]
     return lines
+
+
+def _traps_line(summary: dict[str, int]) -> str:
+    return (
+        f"{summary['traps_avoided']} de {summary['trap_evaluable']} avaliáveis "
+        f"({summary['trap_not_comparable']} sem resposta comparável)"
+    )
 
 
 def _matched(item: QuestionOutcome) -> str:

@@ -238,14 +238,16 @@ class TestApproval:
         assert summary["failed_no_match"] == 1
         assert summary["trap_questions"] == 1
         assert summary["traps_avoided"] == 1
+        assert summary["trap_evaluable"] == 1
+        assert summary["trap_not_comparable"] == 0
         markdown = harness.markdown
         assert "Aprovadas pela esperada: 1" in markdown
         assert "Aprovadas por alternativa válida: 1" in markdown
         assert "Reprovadas por armadilha: 0" in markdown
         assert "Reprovadas sem correspondência: 1" in markdown
-        assert "Armadilhas evitadas: 1 de 1" in markdown
+        assert "Armadilhas evitadas: 1 de 1 avaliáveis (0 sem resposta comparável)" in markdown
 
-    def test_falling_into_a_trap_is_not_counted_as_avoided(self, harness):
+    def test_falling_into_a_trap_is_evaluable_but_not_avoided(self, harness):
         harness.script = answer(ALPHA_SQL)
 
         harness.run(ids="Q01")
@@ -253,7 +255,28 @@ class TestApproval:
         summary = harness.report["summary"]
         assert summary["failed_trap"] == 1
         assert summary["traps_avoided"] == 0
-        assert "Armadilhas evitadas: 0 de 1" in harness.markdown
+        assert summary["trap_evaluable"] == 1
+        assert summary["trap_not_comparable"] == 0
+        assert "Armadilhas evitadas: 0 de 1 avaliáveis (0 sem resposta comparável)" in (
+            harness.markdown
+        )
+
+    def test_trap_question_without_a_match_is_not_evaluable(self, harness):
+        harness.script = answer("SELECT 1 AS x")
+
+        harness.run(ids="Q01")
+
+        summary = harness.report["summary"]
+        assert summary["failed_no_match"] == 1
+        assert summary["traps_avoided"] == 0
+        assert summary["trap_evaluable"] == 0
+        assert summary["trap_not_comparable"] == 1
+        assert "Armadilhas evitadas: 0 de 0 avaliáveis (1 sem resposta comparável)" in (
+            harness.markdown
+        )
+        assert "armadilhas evitadas: 0 de 0 avaliáveis (1 sem resposta comparável)" in (
+            " ".join(harness.output.getvalue().split())
+        )
 
 
 class TestReferences:
