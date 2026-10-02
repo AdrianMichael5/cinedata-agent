@@ -1,6 +1,8 @@
 """Command-line interface for the CineData agent."""
 
+import logging
 from datetime import UTC, datetime, timedelta
+from importlib import metadata
 from typing import Annotated, NoReturn
 
 import typer
@@ -31,6 +33,8 @@ app = typer.Typer(
 console = Console()
 err_console = Console(stderr=True)
 
+DISTRIBUTION = "cinedata-agent"
+
 STATUS_STYLES: dict[ModelStatus, str] = {
     ModelStatus.OK: "green",
     ModelStatus.ROUTER: "yellow",
@@ -56,6 +60,29 @@ def _load_settings() -> Settings:
             "Configuração inválida no .env ou nas variáveis de ambiente: "
             f"{', '.join(names)}. Corrija o valor e tente de novo."
         )
+
+
+def _print_version(value: bool) -> None:
+    if value:
+        console.print(f"{DISTRIBUTION} {metadata.version(DISTRIBUTION)}", markup=False)
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_print_version,
+            is_eager=True,
+            help="Mostra a versão instalada e sai.",
+        ),
+    ] = False,
+) -> None:
+    # sqlglot warns "contains unsupported syntax" on valid SQLite; the validator reports errors.
+    logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
 
 def _not_implemented(command: str) -> None:

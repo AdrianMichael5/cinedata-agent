@@ -1,3 +1,6 @@
+import logging
+from importlib import metadata
+
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -21,6 +24,25 @@ def test_ask_is_still_a_stub():
 
     assert result.exit_code == 1
     assert "não implementado" in result.output
+
+
+@pytest.mark.parametrize("flag", ["--version", "-V"])
+def test_version_option_prints_installed_version(flag):
+    result = runner.invoke(app, [flag])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"cinedata-agent {metadata.version('cinedata-agent')}"
+
+
+def test_commands_silence_sqlglot_warnings(monkeypatch, sample_db):
+    sqlglot_logger = logging.getLogger("sqlglot")
+    monkeypatch.setattr(sqlglot_logger, "level", logging.NOTSET)
+    monkeypatch.setenv("DB_PATH", str(sample_db))
+
+    result = runner.invoke(app, ["sql", "SELECT 1 AS um"])
+
+    assert result.exit_code == 0
+    assert sqlglot_logger.level == logging.ERROR
 
 
 def test_help_lists_all_commands():

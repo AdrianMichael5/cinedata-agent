@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from cinedata_agent.config import DEFAULT_LLM_MODELS, Settings, get_settings
 
 FAKE_KEY = "sk-or-v1-fake-key-for-tests"
+ENV_EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
 
 
 def make_settings() -> Settings:
@@ -35,6 +36,21 @@ class TestDefaults:
 
     def test_default_models_end_with_openrouter_free(self):
         assert DEFAULT_LLM_MODELS[-1] == "openrouter/free"
+
+    def test_default_models_fallback_order(self):
+        assert DEFAULT_LLM_MODELS == (
+            "nvidia/nemotron-3.5-lightning:free",
+            "qwen/qwen3.8-27b:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "openrouter/free",
+        )
+
+    def test_env_example_lists_the_default_models(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+        values = [line.split("=", 1)[1] for line in lines if line.startswith("LLM_MODELS=")]
+
+        assert values == [",".join(DEFAULT_LLM_MODELS)]
 
 
 class TestLlmModels:

@@ -10,8 +10,9 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEFAULT_LLM_MODELS: tuple[str, ...] = (
     "nvidia/nemotron-3.5-lightning:free",
-    "z-ai/glm-5.2:free",
+    "qwen/qwen3.8-27b:free",
     "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "openrouter/free",
 )
 
