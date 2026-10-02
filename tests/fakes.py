@@ -63,6 +63,7 @@ class FakeLLM:
         self.budgets: list[int | None] = []
         self.skipped: list[set[str]] = []
         self.question_ids: list[str | None] = []
+        self.tool_choices: list[str] = []
 
     @property
     def requests_sent(self) -> int:
@@ -75,11 +76,13 @@ class FakeLLM:
         max_requests: int | None = None,
         skip_models: Collection[str] = (),
         question_id: str | None = None,
+        tool_choice: str = "auto",
     ) -> LLMResponse:
         """One request per call, like LLMClient when the first model answers."""
         self.budgets.append(max_requests)
         self.skipped.append(set(skip_models))
         self.question_ids.append(question_id)
+        self.tool_choices.append(tool_choice)
         if max_requests is not None and max_requests <= 0:
             raise RequestBudgetExceededError(used=0, reasons=[])
         self.calls.append(copy.deepcopy(list(messages)))

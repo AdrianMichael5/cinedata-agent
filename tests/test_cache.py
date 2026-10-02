@@ -25,6 +25,8 @@ def make_answer(
     sql: list[str] | None = None,
     warning: str | None = None,
     rows: int = 3,
+    llm_calls: int = 2,
+    sql_log: list[SqlRecord] | None = None,
 ) -> AgentAnswer:
     executed = [SQL] if sql is None else sql
     result = QueryResult(
@@ -38,16 +40,19 @@ def make_answer(
         text=text,
         sql_executed=executed,
         model_used="vendor/model:free",
-        llm_calls=2,
+        llm_calls=llm_calls,
         last_result=result if executed else None,
-        sql_log=[SqlRecord(sql=item) for item in executed],
+        sql_log=sql_log if sql_log is not None else [SqlRecord(sql=item) for item in executed],
         warning=warning,
     )
 
 
+MAX_LLM_CALLS = 3
+
+
 @pytest.fixture
 def cache(tmp_path) -> AnswerCache:
-    return AnswerCache(tmp_path / ".cache", max_rows=200)
+    return AnswerCache(tmp_path / ".cache", max_rows=200, max_llm_calls=MAX_LLM_CALLS)
 
 
 class TestNormalizeQuestion:
@@ -141,7 +146,7 @@ class TestAnswerCache:
         assert hit.created_at.tzinfo is not None
 
     def test_rows_are_capped_at_max_rows(self, tmp_path):
-        small = AnswerCache(tmp_path / ".cache", max_rows=2)
+        small = AnswerCache(tmp_path / ".cache", max_rows=2, max_llm_calls=MAX_LLM_CALLS)
         key = small.key_for(make_settings(), "q")
 
         small.put(key, "q", make_answer(rows=5), 1)
@@ -156,8 +161,15 @@ class TestAnswerCache:
             make_answer(sql=[]),
             make_answer(text="   "),
             make_answer(warning="Aviso: o modelo não concluiu a resposta."),
+            make_answer(llm_calls=MAX_LLM_CALLS),
+            make_answer(
+                sql_log=[
+                    SqlRecord(sql=SQL),
+                    SqlRecord(sql="SELECT nome FROM dim_movies", rejection="no such column: nome"),
+                ]
+            ),
         ],
-        ids=["no_sql", "empty_text", "warning"],
+        ids=["no_sql", "empty_text", "warning", "exhausted_budget", "trailing_sql_error"],
     )
     def test_incomplete_answers_are_not_stored(self, cache, tmp_path, answer):
         key = cache.key_for(make_settings(), "q")
@@ -208,7 +220,7 @@ class TestAnswerCache:
     def test_unwritable_cache_does_not_raise(self, tmp_path):
         blocker = tmp_path / "blocker"
         blocker.write_text("not a directory", encoding="utf-8")
-        cache = AnswerCache(blocker, max_rows=200)
+        cache = AnswerCache(blocker, max_rows=200, max_llm_calls=MAX_LLM_CALLS)
 
         assert cache.put(cache.key_for(make_settings(), "q"), "q", make_answer(), 2) is False
 
@@ -226,7 +238,7 @@ class TestAnswerCache:
 
     def test_entry_file_is_readable_json_without_secrets(self, tmp_path):
         settings = make_settings(openrouter_api_key="sk-or-v1-secret-key-for-cache-tests")
-        cache = AnswerCache(tmp_path / ".cache", max_rows=200)
+        cache = AnswerCache(tmp_path / ".cache", max_rows=200, max_llm_calls=MAX_LLM_CALLS)
         key = cache.key_for(settings, "q")
 
         cache.put(key, "q", make_answer(), 2)
@@ -243,3 +255,4 @@ def test_cache_dir_comes_from_settings(tmp_path):
 
     assert cache.directory == Path(tmp_path / "meu-cache")
     assert cache.max_rows == settings.max_rows
+    assert cache.max_llm_calls == settings.max_llm_calls_per_question

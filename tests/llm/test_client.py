@@ -153,6 +153,20 @@ class TestSuccess:
         assert payload["tool_choice"] == "auto"
         assert payload["temperature"] == 0
 
+    def test_tool_choice_defaults_to_auto(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        assert server.requests[0]["tool_choice"] == "auto"
+
+    def test_tool_choice_none_is_sent_when_requested(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS, tool_choice="none")
+
+        assert server.requests[0]["tool_choice"] == "none"
+
     def test_sends_max_tokens_from_settings(self):
         server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
         settings = Settings(

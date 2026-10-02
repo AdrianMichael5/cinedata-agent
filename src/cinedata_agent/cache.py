@@ -66,21 +66,34 @@ class CachedAnswer:
     created_at: datetime
 
 
-def is_complete(answer: AgentAnswer) -> bool:
-    """Only answers worth replaying: SQL ran, there is text and no fallback warning."""
-    return bool(answer.sql_executed) and bool(answer.text.strip()) and answer.warning is None
+def is_complete(answer: AgentAnswer, max_llm_calls: int) -> bool:
+    """Only answers worth replaying:
+
+    SQL ran, there is text, no fallback warning, the agent did not need its entire call
+    budget to answer, and no SQL attempt failed after the last successful result.
+    """
+    if not (answer.sql_executed and answer.text.strip() and answer.warning is None):
+        return False
+    if answer.llm_calls >= max_llm_calls:
+        return False
+    return not (answer.sql_log and answer.sql_log[-1].rejection is not None)
 
 
 class AnswerCache:
     """One JSON file per answer under <directory>/answers/; failures never break a command."""
 
-    def __init__(self, directory: Path, max_rows: int) -> None:
+    def __init__(self, directory: Path, max_rows: int, max_llm_calls: int) -> None:
         self.directory = directory
         self.max_rows = max_rows
+        self.max_llm_calls = max_llm_calls
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AnswerCache":
-        return cls(settings.cache_dir, max_rows=settings.max_rows)
+        return cls(
+            settings.cache_dir,
+            max_rows=settings.max_rows,
+            max_llm_calls=settings.max_llm_calls_per_question,
+        )
 
     def key_for(self, settings: Settings, question: str) -> str:
         return cache_key(
@@ -109,7 +122,7 @@ class AnswerCache:
 
     def put(self, key: str, question: str, answer: AgentAnswer, requests_sent: int) -> bool:
         """Store a complete answer; return whether it was written."""
-        if not is_complete(answer):
+        if not is_complete(answer, self.max_llm_calls):
             return False
         result = answer.last_result
         payload = {

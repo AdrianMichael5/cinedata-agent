@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import httpx2
 import openai
@@ -152,11 +152,13 @@ class LLMClient:
         max_requests: int | None = None,
         skip_models: Collection[str] = (),
         question_id: str | None = None,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> LLMResponse:
         """Ask each model in order until one answers; stop at once on key, balance or quota.
 
         max_requests caps the requests this call may send (the question's remaining budget);
-        skip_models are models that already failed this question (an empty answer, say).
+        skip_models are models that already failed this question (an empty answer, say);
+        tool_choice is "none" on the agent's last allowed call, to force a text answer.
         """
         attempts: list[Attempt] = []
         for model in (name for name in self._models if name not in skip_models):
@@ -164,7 +166,7 @@ class LLMClient:
                 raise RequestBudgetExceededError(
                     used=len(attempts), reasons=[(a.requested_model, a.outcome) for a in attempts]
                 )
-            attempt, message = self._try_model(model, messages, tools, question_id)
+            attempt, message = self._try_model(model, messages, tools, question_id, tool_choice)
             attempts.append(attempt)
             if message is not None:
                 return LLMResponse(
@@ -181,6 +183,7 @@ class LLMClient:
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolUnionParam],
         question_id: str | None,
+        tool_choice: Literal["auto", "none"],
     ) -> tuple[Attempt, ChatCompletionMessage | None]:
         self._requests_sent += 1
         self._progress(f"Chamando {short_model_name(model)}…")
@@ -193,7 +196,7 @@ class LLMClient:
                 model=model,
                 messages=list(messages),
                 tools=list(tools),
-                tool_choice="auto",
+                tool_choice=tool_choice,
                 temperature=0,
                 max_tokens=self._max_output_tokens,
                 extra_body=extra_body,

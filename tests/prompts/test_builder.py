@@ -166,6 +166,10 @@ class TestOctoberCorrections:
     def test_answer_table_is_capped_at_ten_lines(self, prompt):
         assert "até 10 linhas" in prompt
 
+    def test_no_exploratory_queries(self, prompt):
+        assert "Nunca faça consultas de teste ou exploração" in prompt
+        assert "A primeira SQL já deve responder à pergunta." in prompt
+
 
 class TestExamples:
     def test_has_five_examples(self, prompt):

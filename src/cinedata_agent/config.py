@@ -8,11 +8,13 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Order from a real A/B test: qwen answered in 6-8s per call (~500 tokens); nemotron-lightning
+# took 27-68s (~1000 tokens, mostly reasoning) -- moved after the faster models.
 DEFAULT_LLM_MODELS: tuple[str, ...] = (
-    "nvidia/nemotron-3.5-lightning:free",
     "qwen/qwen3.8-27b:free",
-    "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-26b-a4b-it:free",
     "openrouter/free",
 )
 

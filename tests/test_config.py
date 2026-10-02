@@ -41,11 +41,13 @@ class TestDefaults:
         assert DEFAULT_LLM_MODELS[-1] == "openrouter/free"
 
     def test_default_models_fallback_order(self):
+        # Order from a real A/B test: qwen answered in 6-8s (~500 tokens); nemotron-lightning
+        # took 27-68s (~1000 tokens, mostly reasoning).
         assert DEFAULT_LLM_MODELS == (
-            "nvidia/nemotron-3.5-lightning:free",
             "qwen/qwen3.8-27b:free",
-            "google/gemma-4-26b-a4b-it:free",
             "nvidia/nemotron-3-super-120b-a12b:free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "google/gemma-4-26b-a4b-it:free",
             "openrouter/free",
         )
 

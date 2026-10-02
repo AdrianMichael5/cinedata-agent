@@ -6,7 +6,7 @@ import re
 import uuid
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from openai.types.chat import (
     ChatCompletionMessage,
@@ -51,9 +51,11 @@ FINAL_ANSWER_REQUEST = (
     "Com base nesse resultado, escreva agora a resposta final à pergunta, em português."
 )
 LAST_CALL_NOTE = (
-    "Esta é a sua última chamada: não chame run_sql de novo. Escreva agora a resposta final "
-    "em português com os resultados que já tem, dizendo o que ficou faltando, se for o caso."
+    "Esta é a última etapa: responda agora em português usando apenas os resultados já obtidos."
 )
+ToolChoice = Literal["auto", "none"]
+LAST_CALL_TOOL_CHOICE: ToolChoice = "none"
+DEFAULT_TOOL_CHOICE: ToolChoice = "auto"
 EMPTY_ANSWER_REASON = "resposta vazia"
 EMPTY_ANSWER_NUDGE = (
     "Sua resposta veio vazia. Chame a ferramenta run_sql ou escreva a resposta final em português."
@@ -117,6 +119,7 @@ class ChatModel(Protocol):
         max_requests: int | None = None,
         skip_models: Collection[str] = (),
         question_id: str | None = None,
+        tool_choice: ToolChoice = "auto",
     ) -> LLMResponse: ...
 
 
@@ -212,12 +215,14 @@ class Agent:
         )
         self._conversation = conversation
         while conversation.llm_calls < self._max_calls:
-            if 0 < conversation.llm_calls == self._max_calls - 1:
+            is_final_attempt = 0 < conversation.llm_calls == self._max_calls - 1
+            if is_final_attempt:
                 _append_user_message(conversation.messages, LAST_CALL_NOTE)
             if conversation.sql_log:
                 self._progress("Redigindo resposta…")
+            tool_choice = LAST_CALL_TOOL_CHOICE if is_final_attempt else DEFAULT_TOOL_CHOICE
             try:
-                response = self._complete(conversation)
+                response = self._complete(conversation, tool_choice)
             except (AllModelsFailedError, RequestBudgetExceededError) as error:
                 # Key, balance and quota errors still propagate; an outage or a spent request
                 # budget after a successful query should not throw that result away.
@@ -238,7 +243,7 @@ class Agent:
                 return _answer(conversation, final_text)
         return _answer(conversation, _fallback_text(conversation, _budget_warning(self._max_calls)))
 
-    def _complete(self, conversation: _Conversation) -> LLMResponse:
+    def _complete(self, conversation: _Conversation, tool_choice: ToolChoice) -> LLMResponse:
         """One model call limited to the question's remaining request budget."""
         remaining = self._max_requests - conversation.requests_used
         try:
@@ -248,6 +253,7 @@ class Agent:
                 max_requests=remaining,
                 skip_models=frozenset(conversation.skip_models),
                 question_id=conversation.question_id,
+                tool_choice=tool_choice,
             )
         except RequestBudgetExceededError as error:
             # The client only knows this call; report the whole question.

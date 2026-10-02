@@ -471,10 +471,10 @@ class TestBudget:
             [tool_call_message(COUNT_SQL), tool_call_message(TITLES_SQL), text_message("5.")],
         )
 
-        assert not any("última chamada" in str(m.get("content")) for m in llm.calls[1])
+        assert not any("última etapa" in str(m.get("content")) for m in llm.calls[1])
         last = llm.calls[2][-1]
         assert last["role"] == "user"
-        assert "última chamada" in last["content"]
+        assert "última etapa" in last["content"]
 
     def test_single_call_budget_sends_no_last_call_note(self, db):
         _, llm = ask(db, [text_message("5.")], max_llm_calls_per_question=1)
@@ -491,7 +491,30 @@ class TestBudget:
             assert all(
                 not (a == "user" and b == "user") for a, b in zip(roles, roles[1:], strict=False)
             ), roles
-        assert "última chamada" in llm.calls[2][-1]["content"]
+        assert "última etapa" in llm.calls[2][-1]["content"]
+
+
+class TestLastCallToolChoice:
+    def test_earlier_calls_use_auto(self, db):
+        _, llm = ask(
+            db,
+            [tool_call_message(COUNT_SQL), tool_call_message(TITLES_SQL), text_message("5.")],
+        )
+
+        assert llm.tool_choices[:2] == ["auto", "auto"]
+
+    def test_final_allowed_call_uses_none(self, db):
+        _, llm = ask(
+            db,
+            [tool_call_message(COUNT_SQL), tool_call_message(TITLES_SQL), text_message("5.")],
+        )
+
+        assert llm.tool_choices[2] == "none"
+
+    def test_single_call_budget_keeps_auto(self, db):
+        _, llm = ask(db, [text_message("5.")], max_llm_calls_per_question=1)
+
+        assert llm.tool_choices == ["auto"]
 
 
 class TestAnswerWarning:
@@ -628,7 +651,7 @@ class TestDegenerateAnswer:
         assert answer.warning is not None
         assert answer.warning.startswith("resposta do modelo descartada:")
         assert "total" in answer.text
-        assert not is_complete(answer)
+        assert not is_complete(answer, max_llm_calls=3)
 
     def test_no_calls_left_for_a_retry_falls_back_immediately(self, db):
         answer, llm = ask(

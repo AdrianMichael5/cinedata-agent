@@ -95,7 +95,11 @@ class Harness:
         self.output_dir = tmp_path / "results"
         self.settings = evaluation_settings(_env_file=None, db_path=sample_db)
         self.database = SQLiteDatabase(sample_db, timeout_seconds=5, max_rows=200)
-        self.cache = AnswerCache(tmp_path / ".cache", max_rows=200)
+        self.cache = AnswerCache(
+            tmp_path / ".cache",
+            max_rows=200,
+            max_llm_calls=self.settings.max_llm_calls_per_question,
+        )
         self.script: list = []
         self.llms: list[FakeLLM] = []
         self.quotas: list[Any] = [50]
