@@ -202,6 +202,20 @@ class TestSqlRecords:
         assert record.rejection is not None and "nome" in record.rejection
         assert answer.sql_executed == []
 
+    def test_failed_sql_after_a_successful_one_keeps_the_successful_result(self, db):
+        answer, _ = ask(
+            db,
+            [
+                tool_call_message(COUNT_SQL),
+                tool_call_message("SELECT nome FROM dim_movies"),
+                text_message("5 filmes."),
+            ],
+        )
+
+        assert answer.last_result is not None
+        assert answer.last_result.rows == ((5,),)
+        assert answer.sql_executed == [COUNT_SQL]
+
     def test_unknown_macro_is_logged_as_written(self, db):
         sql = "SELECT 1 WHERE 'a' NOT IN {{OUTRA}}"
 

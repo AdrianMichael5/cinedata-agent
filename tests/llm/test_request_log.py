@@ -23,6 +23,8 @@ def record(status: int | None, when: datetime, model: str = "a/model:free") -> R
         prompt_tokens=None,
         completion_tokens=None,
         error_type=None if status == 200 else "provider_capacity",
+        finish_reason="stop" if status == 200 else None,
+        reasoning_tokens=None,
     )
 
 

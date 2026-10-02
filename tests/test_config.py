@@ -26,7 +26,8 @@ class TestDefaults:
         assert settings.max_rows == 200
         assert settings.max_llm_calls_per_question == 3
         assert settings.max_requests_per_question == 6
-        assert settings.max_output_tokens == 1500
+        assert settings.max_output_tokens == 2000
+        assert settings.llm_reasoning_effort == "low"
         assert settings.cache_dir == Path(".cache")
         assert settings.log_level == "INFO"
 
@@ -67,7 +68,12 @@ class TestDefaults:
     def test_env_example_sets_the_output_token_cap(self):
         lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
 
-        assert "MAX_OUTPUT_TOKENS=1500" in lines
+        assert "MAX_OUTPUT_TOKENS=2000" in lines
+
+    def test_env_example_sets_the_reasoning_effort(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+        assert "LLM_REASONING_EFFORT=low" in lines
 
     def test_request_log_defaults_to_logs_folder(self):
         assert make_settings().request_log_path == Path("logs/requests.jsonl")
@@ -150,6 +156,22 @@ class TestReferenceDate:
 
         with pytest.raises(ValidationError):
             make_settings()
+
+
+class TestReasoningEffort:
+    def test_defaults_to_low(self):
+        assert make_settings().llm_reasoning_effort == "low"
+
+    def test_reads_from_env(self, monkeypatch):
+        monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+
+        assert make_settings().llm_reasoning_effort == "high"
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_blank_disables_it(self, monkeypatch, raw):
+        monkeypatch.setenv("LLM_REASONING_EFFORT", raw)
+
+        assert make_settings().llm_reasoning_effort == ""
 
 
 class TestValidation:

@@ -165,12 +165,48 @@ class TestSuccess:
 
         assert server.requests[0]["max_tokens"] == 400
 
-    def test_default_max_tokens_is_1500(self):
+    def test_default_max_tokens_is_2000(self):
         server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
 
         make_client(server).complete(MESSAGES, TOOLS)
 
-        assert server.requests[0]["max_tokens"] == 1500
+        assert server.requests[0]["max_tokens"] == 2000
+
+
+class TestReasoningEffort:
+    def test_default_low_effort_is_sent(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        assert server.requests[0]["reasoning"] == {"effort": "low"}
+
+    def test_custom_effort_is_sent(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+        settings = Settings(
+            _env_file=None,
+            openrouter_api_key=FAKE_KEY,
+            llm_models=MODELS,
+            llm_reasoning_effort="high",
+        )
+        http_client = httpx2.Client(transport=httpx2.MockTransport(server))
+        llm = LLMClient(settings, http_client=http_client)
+
+        llm.complete(MESSAGES, TOOLS)
+
+        assert server.requests[0]["reasoning"] == {"effort": "high"}
+
+    def test_blank_effort_sends_nothing(self):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+        settings = Settings(
+            _env_file=None, openrouter_api_key=FAKE_KEY, llm_models=MODELS, llm_reasoning_effort=""
+        )
+        http_client = httpx2.Client(transport=httpx2.MockTransport(server))
+        llm = LLMClient(settings, http_client=http_client)
+
+        llm.complete(MESSAGES, TOOLS)
+
+        assert "reasoning" not in server.requests[0]
 
     def test_sends_key_as_bearer_to_the_configured_base_url(self):
         seen: list[httpx2.Request] = []
@@ -574,6 +610,72 @@ class TestMalformedResponses:
         assert "Provider returned error" in response.attempts[0].outcome
 
 
+class TestTruncatedResponse:
+    def test_truncated_tool_call_moves_to_the_next_model(self):
+        body = completion_body("first/model:free", content=None)
+        body["choices"][0]["finish_reason"] = "length"
+        body["choices"][0]["message"]["tool_calls"] = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "run_sql", "arguments": '{"query": "SELECT 1'},
+            }
+        ]
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": httpx2.Response(200, json=body),
+                "second/model:free": ok("second/model:free"),
+            }
+        )
+
+        response = make_client(server).complete(MESSAGES, TOOLS)
+
+        assert response.model_used == "second/model:free"
+        assert server.models_called == ["first/model:free", "second/model:free"]
+
+    def test_truncated_final_text_moves_to_the_next_model(self):
+        body = completion_body("first/model:free", content="resposta cortada no meio")
+        body["choices"][0]["finish_reason"] = "length"
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": httpx2.Response(200, json=body),
+                "second/model:free": ok("second/model:free"),
+            }
+        )
+
+        response = make_client(server).complete(MESSAGES, TOOLS)
+
+        assert response.model_used == "second/model:free"
+        assert "length" in response.attempts[0].outcome or "cortad" in response.attempts[0].outcome
+
+    def test_never_retries_the_same_model_after_truncation(self):
+        def truncated(model: str) -> httpx2.Response:
+            body = completion_body(model)
+            body["choices"][0]["finish_reason"] = "length"
+            return httpx2.Response(200, json=body)
+
+        server = ScriptedOpenRouter({model: truncated(model) for model in MODELS})
+
+        with pytest.raises(AllModelsFailedError):
+            make_client(server).complete(MESSAGES, TOOLS)
+
+        assert server.models_called == MODELS
+
+    def test_truncated_attempts_count_toward_the_request_budget(self):
+        def truncated(model: str) -> httpx2.Response:
+            body = completion_body(model)
+            body["choices"][0]["finish_reason"] = "length"
+            return httpx2.Response(200, json=body)
+
+        server = ScriptedOpenRouter({model: truncated(model) for model in MODELS})
+        llm = make_client(server)
+
+        with pytest.raises(RequestBudgetExceededError):
+            llm.complete(MESSAGES, TOOLS, max_requests=2)
+
+        assert llm.requests_sent == 2
+
+
 class TestAllModelsFailed:
     def test_lists_the_reason_of_each_attempt(self):
         server = ScriptedOpenRouter(
@@ -724,6 +826,62 @@ class TestRequestLog:
         assert (second["prompt_tokens"], second["completion_tokens"]) == (1200, 85)
         assert isinstance(second["latency_ms"], int)
         assert datetime.fromisoformat(second["timestamp"]).tzinfo is not None
+
+    def test_finish_reason_is_logged_on_success(self, tmp_path):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        [line] = self.read_log(tmp_path)
+        assert line["finish_reason"] == "stop"
+
+    def test_finish_reason_is_none_without_a_completion(self, tmp_path):
+        server = ScriptedOpenRouter({"first/model:free": httpx2.ReadTimeout("slow")})
+
+        with pytest.raises(AllModelsFailedError):
+            make_client(server, models=["first/model:free"]).complete(MESSAGES, TOOLS)
+
+        [line] = self.read_log(tmp_path)
+        assert line["finish_reason"] is None
+
+    def test_truncated_response_is_logged_with_truncated_error_type(self, tmp_path):
+        body = completion_body("first/model:free")
+        body["choices"][0]["finish_reason"] = "length"
+        server = ScriptedOpenRouter(
+            {
+                "first/model:free": httpx2.Response(200, json=body),
+                "second/model:free": ok("second/model:free"),
+            }
+        )
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        first, _ = self.read_log(tmp_path)
+        assert first["error_type"] == "truncated"
+        assert first["finish_reason"] == "length"
+
+    def test_reasoning_tokens_are_logged_when_present(self, tmp_path):
+        body = completion_body("first/model:free")
+        body["usage"] = {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "completion_tokens_details": {"reasoning_tokens": 20},
+        }
+        server = ScriptedOpenRouter({"first/model:free": httpx2.Response(200, json=body)})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        [line] = self.read_log(tmp_path)
+        assert line["reasoning_tokens"] == 20
+
+    def test_reasoning_tokens_is_none_when_absent(self, tmp_path):
+        server = ScriptedOpenRouter({"first/model:free": ok("first/model:free")})
+
+        make_client(server).complete(MESSAGES, TOOLS)
+
+        [line] = self.read_log(tmp_path)
+        assert line["reasoning_tokens"] is None
 
     @pytest.mark.parametrize(
         ("response", "error_type", "expected_error"),

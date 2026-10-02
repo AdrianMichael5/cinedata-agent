@@ -27,6 +27,8 @@ class RequestRecord:
     prompt_tokens: int | None
     completion_tokens: int | None
     error_type: str | None
+    finish_reason: str | None
+    reasoning_tokens: int | None
 
     @property
     def utc_day(self) -> date:

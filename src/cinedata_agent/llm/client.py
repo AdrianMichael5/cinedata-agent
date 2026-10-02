@@ -50,6 +50,7 @@ MODEL_UNAVAILABLE_MARKERS = (
     "does not support tool",
     "doesn't support tool",
 )
+TRUNCATED_REASON = "resposta cortada pelo limite de tokens (finish_reason=length)"
 PAYMENT_REQUIRED_MESSAGE = (
     "O OpenRouter recusou a chamada por falta de saldo (HTTP 402). Modelos gratuitos não "
     "cobram: confira se o saldo da conta em openrouter.ai/settings/credits não está negativo."
@@ -74,6 +75,7 @@ class ErrorKind(StrEnum):
     EMBEDDED_ERROR = "embedded_error"
     EMPTY_CHOICES = "empty_choices"
     NO_MESSAGE = "no_message"
+    TRUNCATED = "truncated"
 
 
 TRANSPORT_REASONS: dict[ErrorKind, str] = {
@@ -126,6 +128,7 @@ class LLMClient:
             raise AuthenticationError(INVALID_KEY_MESSAGE)
         self._models = tuple(settings.llm_models)
         self._max_output_tokens = settings.max_output_tokens
+        self._reasoning_effort = settings.llm_reasoning_effort
         self._openai = OpenAI(
             base_url=settings.openrouter_base_url,
             api_key=key,
@@ -182,6 +185,9 @@ class LLMClient:
         self._requests_sent += 1
         self._progress(f"Chamando {short_model_name(model)}…")
         context = _RequestContext(model, question_id, time.perf_counter())
+        extra_body = (
+            {"reasoning": {"effort": self._reasoning_effort}} if self._reasoning_effort else None
+        )
         try:
             completion = self._openai.chat.completions.create(
                 model=model,
@@ -190,6 +196,7 @@ class LLMClient:
                 tool_choice="auto",
                 temperature=0,
                 max_tokens=self._max_output_tokens,
+                extra_body=extra_body,
             )
         except openai.APIStatusError as error:
             kind = _status_error_kind(error)
@@ -215,7 +222,9 @@ class LLMClient:
 
         model_field: object = completion.model
         responded = model_field if isinstance(model_field, str) and model_field else None
-        message = completion.choices[0].message if completion.choices else None
+        choice = completion.choices[0] if completion.choices else None
+        message = choice.message if choice is not None else None
+        finish_reason = choice.finish_reason if choice is not None else None
         embedded = _embedded_error(completion)
         if embedded is not None:
             kind: ErrorKind | None = ErrorKind.EMBEDDED_ERROR
@@ -224,9 +233,14 @@ class LLMClient:
             kind, reason = ErrorKind.EMPTY_CHOICES, TRANSPORT_REASONS[ErrorKind.EMPTY_CHOICES]
         elif message is None:
             kind, reason = ErrorKind.NO_MESSAGE, TRANSPORT_REASONS[ErrorKind.NO_MESSAGE]
+        elif finish_reason == "length":
+            # The reply (a tool call or the final text) was cut off mid-way: unusable either way.
+            kind, reason = ErrorKind.TRUNCATED, TRUNCATED_REASON
         else:
             kind, reason = None, OK_OUTCOME
-        self._record(context, responded, 200, kind, usage=completion.usage)
+        self._record(
+            context, responded, 200, kind, usage=completion.usage, finish_reason=finish_reason
+        )
         attempt = Attempt(context.model, responded, 200, _elapsed_ms(context), reason)
         return attempt, (message if kind is None else None)
 
@@ -243,6 +257,7 @@ class LLMClient:
         status: int | None,
         kind: ErrorKind | None,
         usage: Any = None,
+        finish_reason: str | None = None,
     ) -> None:
         """Log one request (never the key or the prompt) to the logger and the JSONL file."""
         elapsed = _elapsed_ms(context)
@@ -265,6 +280,8 @@ class LLMClient:
                 prompt_tokens=_token_count(usage, "prompt_tokens"),
                 completion_tokens=_token_count(usage, "completion_tokens"),
                 error_type=kind.value if kind is not None else None,
+                finish_reason=finish_reason,
+                reasoning_tokens=_reasoning_tokens(usage),
             )
         )
 
@@ -370,6 +387,11 @@ def _embedded_error(completion: ChatCompletion) -> str | None:
 def _token_count(usage: Any, name: str) -> int | None:
     value = getattr(usage, name, None)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _reasoning_tokens(usage: Any) -> int | None:
+    details = getattr(usage, "completion_tokens_details", None)
+    return _token_count(details, "reasoning_tokens")
 
 
 def _quota_exhausted() -> QuotaExhaustedError:

@@ -47,7 +47,10 @@ class Settings(BaseSettings):
     max_requests_per_question: int = Field(default=6, gt=0)
     # Caps a single model's reply: guards against degenerate output (repetition, leaked
     # reasoning) that would otherwise run until the provider's own token limit.
-    max_output_tokens: int = Field(default=1500, gt=0)
+    max_output_tokens: int = Field(default=2000, gt=0)
+    # Sent as extra_body={"reasoning": {"effort": ...}}; blank means do not send it at all.
+    # OpenRouter ignores the parameter on models that do not support it.
+    llm_reasoning_effort: str = "low"
     cache_dir: Path = Path(".cache")
     # One JSON line per OpenRouter request (no key, no prompt), to compare with the quota.
     request_log_path: Path = Path("logs/requests.jsonl")
@@ -67,6 +70,11 @@ class Settings(BaseSettings):
         # A repeated model would be tried twice in one fallback pass, burning quota for nothing.
         names = (item.strip() if isinstance(item, str) else item for item in items)
         return list(dict.fromkeys(name for name in names if name))
+
+    @field_validator("llm_reasoning_effort", mode="before")
+    @classmethod
+    def _strip_reasoning_effort(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator("reference_date_override", mode="before")
     @classmethod
