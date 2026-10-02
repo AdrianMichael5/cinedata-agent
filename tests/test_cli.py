@@ -1,12 +1,19 @@
 import logging
+from datetime import UTC, datetime
 from importlib import metadata
 
 import httpx
 import pytest
+from fakes import FAKE_MODEL, FakeLLM, text_message, tool_call_message
 from typer.testing import CliRunner
 
 from cinedata_agent import cli
 from cinedata_agent.cli import app
+from cinedata_agent.llm.errors import (
+    AllModelsFailedError,
+    PaymentRequiredError,
+    QuotaExhaustedError,
+)
 
 runner = CliRunner()
 
@@ -19,11 +26,103 @@ def use_mock_http(monkeypatch, handler) -> None:
     )
 
 
-def test_ask_is_still_a_stub():
-    result = runner.invoke(app, ["ask", "Top 10 filmes com maior receita"])
+COUNT_SQL = "SELECT COUNT(*) AS total FROM dim_movies"
 
-    assert result.exit_code == 1
-    assert "não implementado" in result.output
+
+class TestAskCommand:
+    @pytest.fixture(autouse=True)
+    def configure(self, monkeypatch, sample_db):
+        monkeypatch.setenv("DB_PATH", str(sample_db))
+        monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+
+    def use_fake_llm(self, monkeypatch, script) -> FakeLLM:
+        llm = FakeLLM(script)
+        monkeypatch.setattr(cli, "LLMClient", lambda settings: llm)
+        return llm
+
+    def test_prints_answer_model_and_llm_calls(self, monkeypatch):
+        llm = self.use_fake_llm(
+            monkeypatch, [tool_call_message(COUNT_SQL), text_message("O catálogo tem 5 filmes.")]
+        )
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 0
+        assert "O catálogo tem 5 filmes." in result.output
+        assert FAKE_MODEL in result.output
+        assert "Chamadas ao LLM: 2" in result.output
+        assert COUNT_SQL not in result.output
+        assert llm.requests_sent == 2
+
+    def test_show_sql_lists_executed_queries(self, monkeypatch):
+        self.use_fake_llm(monkeypatch, [tool_call_message(COUNT_SQL), text_message("5 filmes.")])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?", "--show-sql"])
+
+        assert result.exit_code == 0
+        assert COUNT_SQL in result.output
+
+    def test_show_sql_says_when_nothing_ran(self, monkeypatch):
+        self.use_fake_llm(monkeypatch, [text_message("Fora do escopo.")])
+
+        result = runner.invoke(app, ["ask", "Qual a capital da França?", "--show-sql"])
+
+        assert result.exit_code == 0
+        assert "Nenhuma SQL executada" in result.output
+
+    def test_answer_text_is_not_parsed_as_markup(self, monkeypatch):
+        self.use_fake_llm(monkeypatch, [text_message("Filme [bold]Rec[/bold] lidera.")])
+
+        result = runner.invoke(app, ["ask", "Qual filme lidera?"])
+
+        assert "[bold]Rec[/bold]" in result.output
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            QuotaExhaustedError(
+                "Cota [esgotada]: renova às 21:00.", datetime(2026, 10, 2, tzinfo=UTC)
+            ),
+            AllModelsFailedError([("a/model:free", "HTTP 503: falha temporária")]),
+            PaymentRequiredError("Saldo negativo (HTTP 402)."),
+        ],
+        ids=["quota", "all_models_failed", "payment_required"],
+    )
+    def test_llm_errors_exit_with_their_message_after_one_call(self, monkeypatch, error):
+        llm = self.use_fake_llm(monkeypatch, [error, text_message("nunca chamado")])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 1
+        assert str(error) in " ".join(result.output.split())
+        assert llm.requests_sent == 1
+
+    def test_missing_key_exits_before_any_request(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "")
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 1
+        assert "OPENROUTER_API_KEY" in result.output
+
+    def test_missing_database_exits_with_message(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "nada" / "cinerocket.db"))
+        llm = self.use_fake_llm(monkeypatch, [])
+
+        result = runner.invoke(app, ["ask", "Quantos filmes existem?"])
+
+        assert result.exit_code == 1
+        assert "não encontrado" in result.output
+        assert llm.requests_sent == 0
+
+    def test_blank_question_exits_without_calling_the_llm(self, monkeypatch):
+        llm = self.use_fake_llm(monkeypatch, [])
+
+        result = runner.invoke(app, ["ask", "   "])
+
+        assert result.exit_code == 1
+        assert "vazia" in result.output
+        assert llm.requests_sent == 0
 
 
 @pytest.mark.parametrize("flag", ["--version", "-V"])

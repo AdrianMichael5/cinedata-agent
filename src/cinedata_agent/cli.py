@@ -11,10 +11,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from cinedata_agent.agent import Agent
 from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
 from cinedata_agent.formatting import result_summary, result_table
+from cinedata_agent.llm.client import LLMClient
 from cinedata_agent.llm.errors import OpenRouterError
 from cinedata_agent.llm.openrouter_account import (
     ModelsReport,
@@ -30,8 +32,9 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-console = Console()
-err_console = Console(stderr=True)
+# emoji=False: model ids such as "a/model:free: ..." would otherwise render ":free:" as an emoji.
+console = Console(emoji=False)
+err_console = Console(stderr=True, emoji=False)
 
 DISTRIBUTION = "cinedata-agent"
 
@@ -85,17 +88,43 @@ def main(
     logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
 
-def _not_implemented(command: str) -> None:
-    """Warn that a command is still a stub and exit with a non-zero status."""
-    err_console.print(f"[yellow]Comando '{command}' ainda não implementado.[/yellow]")
-    raise typer.Exit(code=1)
-
-
 @app.command(help="Responde a uma pergunta sobre o catálogo em linguagem natural.")
 def ask(
     question: Annotated[str, typer.Argument(help="Pergunta em português.")],
+    show_sql: Annotated[
+        bool, typer.Option("--show-sql", help="Mostra as SQLs executadas.")
+    ] = False,
 ) -> None:
-    _not_implemented("ask")
+    settings = _load_settings()
+    if not question.strip():
+        _fail("A pergunta está vazia: escreva o que quer saber sobre o catálogo.")
+    try:
+        # Database first: a missing file must fail before any request is spent.
+        database = get_database(settings)
+        llm = LLMClient(settings)
+        answer = Agent(settings, database, llm).ask(question)
+    except (DatabaseError, NotImplementedError, OpenRouterError) as error:
+        _fail(str(error))
+
+    console.print(answer.text, markup=False, highlight=False)
+    console.print()
+    console.print(
+        f"Modelo: {answer.model_used or '-'} · Chamadas ao LLM: {answer.llm_calls} · "
+        f"Requisições ao OpenRouter: {llm.requests_sent}",
+        style="dim",
+        markup=False,
+    )
+    if show_sql:
+        _print_sql(answer.sql_executed)
+
+
+def _print_sql(queries: list[str]) -> None:
+    if not queries:
+        console.print("Nenhuma SQL executada.", style="dim")
+        return
+    for position, query in enumerate(queries, start=1):
+        console.print(f"\nSQL {position}:", style="bold")
+        console.print(query, markup=False, highlight=False, soft_wrap=True)
 
 
 @app.command(help="Executa uma consulta SQL somente leitura no banco.")
