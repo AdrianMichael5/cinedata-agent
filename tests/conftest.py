@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 
 from cinedata_agent.config import get_settings
@@ -54,10 +55,12 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
 def block_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail loudly if any test reaches a real HTTP transport (httpx.MockTransport still works)."""
 
-    def refuse(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    def refuse(self: Any, request: Any) -> Any:
         raise RuntimeError(f"Network access is disabled in tests: {request.method} {request.url}")
 
+    # httpx for the account helpers; httpx2 is what the openai SDK sends through.
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", refuse)
 
     # Socket-level guard as well: covers any client (async httpx, other SDKs), loopback excepted.
     original_connect = socket.socket.connect
