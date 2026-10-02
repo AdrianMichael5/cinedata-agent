@@ -479,6 +479,34 @@ class TestBudget:
         assert "última chamada" in llm.calls[2][-1]["content"]
 
 
+class TestAnswerWarning:
+    def test_normal_answer_has_no_warning(self, db):
+        answer, _ = ask(db, [tool_call_message(COUNT_SQL), text_message("5 filmes.")])
+
+        assert answer.warning is None
+
+    def test_exhausted_call_budget_sets_the_warning(self, db):
+        answer, _ = ask(db, [tool_call_message(COUNT_SQL) for _ in range(3)])
+
+        assert answer.warning is not None
+        assert "não concluiu" in answer.warning
+        assert answer.text.startswith(answer.warning)
+
+    def test_empty_answer_sets_the_warning(self, db):
+        answer, _ = ask(db, [tool_call_message(COUNT_SQL), text_message("")])
+
+        assert answer.warning is not None
+        assert "resposta vazia" in answer.warning
+
+    def test_llm_outage_after_a_result_sets_the_warning(self, db):
+        failure = AllModelsFailedError([("a/model:free", "HTTP 503: falha temporária")])
+
+        answer, _ = ask(db, [tool_call_message(COUNT_SQL), failure])
+
+        assert answer.warning is not None
+        assert "indisponível" in answer.warning
+
+
 class TestEmptyFinalAnswer:
     @pytest.mark.parametrize(
         "empty",

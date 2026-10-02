@@ -3,6 +3,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 from importlib import metadata
+from pathlib import Path
 
 import httpx
 import pytest
@@ -200,6 +201,124 @@ class TestAskCommand:
         assert result.exit_code == 1
         assert "vazia" in result.output
         assert llm.requests_sent == 0
+
+
+class TestAskCache:
+    QUESTION = "Quantos filmes existem?"
+
+    @pytest.fixture(autouse=True)
+    def configure(self, monkeypatch, sample_db):
+        monkeypatch.setenv("DB_PATH", str(sample_db))
+        monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+        self.clients: list[FakeLLM] = []
+        self.scripts: list[list] = []
+
+        def factory(settings, **kwargs):
+            llm = FakeLLM(self.scripts.pop(0) if self.scripts else [])
+            self.clients.append(llm)
+            return llm
+
+        monkeypatch.setattr(cli, "LLMClient", factory)
+
+    def complete_script(self) -> list:
+        return [tool_call_message(COUNT_SQL), text_message("O catálogo tem 5 filmes.")]
+
+    def test_second_ask_is_served_from_the_cache(self):
+        self.scripts.append(self.complete_script())
+
+        first = runner.invoke(app, ["ask", self.QUESTION])
+        second = runner.invoke(app, ["ask", "  quantos FILMES existem "])
+
+        assert first.exit_code == 0 and second.exit_code == 0
+        assert "do cache" not in first.output
+        assert "O catálogo tem 5 filmes." in second.output
+        assert "(do cache, 0 requisições)" in second.output
+        assert len(self.clients) == 1
+        assert self.clients[0].requests_sent == 2
+
+    def test_cache_hit_needs_no_api_key(self, monkeypatch):
+        self.scripts.append(self.complete_script())
+        runner.invoke(app, ["ask", self.QUESTION])
+        monkeypatch.setenv("OPENROUTER_API_KEY", "")
+
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert result.exit_code == 0
+        assert "(do cache, 0 requisições)" in result.output
+
+    def test_no_cache_ignores_a_stored_answer(self):
+        self.scripts.extend([self.complete_script(), self.complete_script()])
+        runner.invoke(app, ["ask", self.QUESTION])
+
+        result = runner.invoke(app, ["ask", self.QUESTION, "--no-cache"])
+
+        assert result.exit_code == 0
+        assert "do cache" not in result.output
+        assert len(self.clients) == 2
+        assert self.clients[1].requests_sent == 2
+
+    def test_answer_without_sql_is_not_cached(self):
+        self.scripts.extend([[text_message("Fora do escopo.")], [text_message("Fora do escopo.")]])
+
+        runner.invoke(app, ["ask", self.QUESTION])
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert "do cache" not in result.output
+        assert len(self.clients) == 2
+
+    def test_answer_with_a_warning_is_not_cached(self):
+        empty_answer = [tool_call_message(COUNT_SQL), text_message("")]
+        self.scripts.extend([empty_answer, self.complete_script()])
+
+        runner.invoke(app, ["ask", self.QUESTION])
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert "do cache" not in result.output
+        assert len(self.clients) == 2
+
+    def test_corrupted_entry_falls_back_to_the_llm(self):
+        self.scripts.extend([self.complete_script(), self.complete_script()])
+        runner.invoke(app, ["ask", self.QUESTION])
+        [entry] = Path(".cache/answers").glob("*.json")
+        entry.write_text("{corrompido", encoding="utf-8")
+
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert result.exit_code == 0
+        assert "O catálogo tem 5 filmes." in result.output
+        assert "do cache" not in result.output
+        assert len(self.clients) == 2
+
+    def test_show_sql_on_a_cache_hit_lists_the_stored_sql(self):
+        self.scripts.append(self.complete_script())
+        runner.invoke(app, ["ask", self.QUESTION])
+
+        result = runner.invoke(app, ["ask", self.QUESTION, "--show-sql"])
+
+        assert "(do cache, 0 requisições)" in result.output
+        assert COUNT_SQL in result.output
+
+    def test_backend_without_a_prompt_fails_cleanly(self, monkeypatch):
+        monkeypatch.setenv("DB_BACKEND", "databricks")
+
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert result.exit_code == 1
+        assert "opcional" in result.output
+        assert "Requisições ao OpenRouter: 0" in result.output
+        assert self.clients == []
+
+    def test_cache_clear_removes_entries(self):
+        self.scripts.extend([self.complete_script(), self.complete_script()])
+        runner.invoke(app, ["ask", self.QUESTION])
+
+        cleared = runner.invoke(app, ["cache", "clear"])
+        result = runner.invoke(app, ["ask", self.QUESTION])
+
+        assert cleared.exit_code == 0
+        assert "1 entrada(s) removida(s)" in cleared.output
+        assert "do cache" not in result.output
+        assert len(self.clients) == 2
 
 
 class TestUtf8Streams:

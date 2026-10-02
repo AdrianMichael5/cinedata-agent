@@ -99,6 +99,8 @@ class AgentAnswer:
     last_result: QueryResult | None
     # Every query attempted, rejected ones included, in order.
     sql_log: list[SqlRecord] = field(default_factory=list)
+    # Why the answer is incomplete (budget spent, empty answer, LLM down); None when complete.
+    warning: str | None = None
 
 
 @dataclass
@@ -118,6 +120,8 @@ class _Conversation:
     failures: list[tuple[str, str]] = field(default_factory=list)
     # Models that gave an empty answer: not asked again for this question.
     skip_models: set[str] = field(default_factory=set)
+    # Set when the answer was built in Python because the model could not finish.
+    warning: str | None = None
 
 
 class Agent:
@@ -361,7 +365,11 @@ def _budget_warning(max_calls: int) -> str:
 
 
 def _fallback_text(conversation: _Conversation, warning: str) -> str:
-    """Answer built in Python when the model cannot finish: the warning plus the last result."""
+    """Answer built in Python when the model cannot finish: the warning plus the last result.
+
+    Records the warning on the conversation, so the answer is known to be incomplete.
+    """
+    conversation.warning = warning
     if conversation.last_result is None:
         return f"{warning} E nenhuma consulta retornou resultado: tente reformular a pergunta."
     return (
@@ -378,4 +386,5 @@ def _answer(conversation: _Conversation, text: str) -> AgentAnswer:
         model_used=conversation.model_used,
         llm_calls=conversation.llm_calls,
         last_result=conversation.last_result,
+        warning=conversation.warning,
     )

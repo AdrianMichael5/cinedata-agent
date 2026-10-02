@@ -12,7 +12,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cinedata_agent.agent import Agent, RunStats, SqlRecord
+from cinedata_agent.agent import Agent, AgentAnswer, RunStats, SqlRecord
+from cinedata_agent.cache import AnswerCache, CachedAnswer
 from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
@@ -20,6 +21,7 @@ from cinedata_agent.formatting import result_summary, result_table
 from cinedata_agent.llm.client import LLMClient
 from cinedata_agent.llm.errors import OpenRouterError
 from cinedata_agent.llm.openrouter_account import (
+    BRASILIA_TZ,
     ModelsReport,
     ModelStatus,
     get_quota,
@@ -112,10 +114,39 @@ def ask(
     show_sql: Annotated[
         bool, typer.Option("--show-sql", help="Mostra as SQLs executadas.")
     ] = False,
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Ignora a resposta guardada e consulta o modelo de novo."),
+    ] = False,
 ) -> None:
     settings = _load_settings()
     if not question.strip():
         _fail("A pergunta está vazia: escreva o que quer saber sobre o catálogo.")
+    cache = AnswerCache.from_settings(settings)
+    try:
+        key = cache.key_for(settings, question)
+    except NotImplementedError as error:
+        _fail_with_footer(str(error), None, None)
+
+    cached = None if no_cache else cache.get(key)
+    if cached is not None:
+        _print_cached_answer(cached, show_sql)
+        return
+
+    answer, requests_sent = _run_agent(settings, question)
+    console.print(answer.text, markup=False, highlight=False)
+    console.print()
+    console.print(
+        _footer(answer.model_used, answer.llm_calls, requests_sent), style="dim", markup=False
+    )
+    if show_sql:
+        _print_sql(answer.sql_log)
+    # --no-cache skips the lookup only: a fresh complete answer still refreshes the entry.
+    cache.put(key, question, answer, requests_sent)
+
+
+def _run_agent(settings: Settings, question: str) -> tuple[AgentAnswer, int]:
+    """Answer with the model; on any error print it with the footer and exit 1."""
     llm: LLMClient | None = None
     agent: Agent | None = None
     try:
@@ -136,14 +167,21 @@ def ask(
         # Last line of defense: a clear message and the footer, never a silent exit.
         logger.debug("Unexpected error in ask", exc_info=True)
         _fail_with_footer(f"Erro inesperado ({type(error).__name__}): {error}", llm, agent)
+    return answer, llm.requests_sent
 
-    console.print(answer.text, markup=False, highlight=False)
+
+def _print_cached_answer(cached: CachedAnswer, show_sql: bool) -> None:
+    created = cached.created_at.astimezone(BRASILIA_TZ)
+    console.print(cached.text, markup=False, highlight=False)
     console.print()
     console.print(
-        _footer(answer.model_used, answer.llm_calls, llm.requests_sent), style="dim", markup=False
+        f"Modelo: {cached.model_used or '-'} · (do cache, 0 requisições) · resposta de "
+        f"{created:%d/%m/%Y %H:%M} com {cached.llm_calls} chamada(s) ao LLM",
+        style="dim",
+        markup=False,
     )
     if show_sql:
-        _print_sql(answer.sql_log)
+        _print_sql([SqlRecord(sql=sql) for sql in cached.sql_executed])
 
 
 def _footer(model: str | None, llm_calls: int, requests_sent: int) -> str:
@@ -162,6 +200,18 @@ def _fail_with_footer(message: str, llm: LLMClient | None, agent: Agent | None) 
         _footer(stats.model_used, stats.llm_calls, requests_sent), style="dim", markup=False
     )
     raise typer.Exit(code=1)
+
+
+cache_app = typer.Typer(help="Gerencia o cache de respostas.", no_args_is_help=True)
+app.add_typer(cache_app, name="cache")
+
+
+@cache_app.command("clear", help="Apaga todas as respostas guardadas no cache.")
+def cache_clear() -> None:
+    settings = _load_settings()
+    cache = AnswerCache.from_settings(settings)
+    removed = cache.clear()
+    console.print(f"{removed} entrada(s) removida(s) de {cache.directory}.", markup=False)
 
 
 @app.command(help="Soma as requisições ao OpenRouter do log local (não gasta requisições).")
