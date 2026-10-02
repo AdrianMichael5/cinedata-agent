@@ -15,6 +15,7 @@ from cinedata_agent.db.base import QueryResult
 TOP_K = 5
 RECALL_THRESHOLD = 0.8
 VALUE_TOLERANCE = 0.01
+VALUE_SCALES = (1.0, 1e3, 1e6, 1e9)
 AGREE_TOLERANCE = 1e-6
 _DATE_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
@@ -63,7 +64,9 @@ def compare_results(expected: ResultTable, actual: ResultTable | None) -> Compar
     expected_keys = [_row_key(row, key_indexes) for row in expected.rows]
     actual_keys = [_row_key(row, matched) for row in actual.rows]
     top1_ok = bool(expected_keys) and actual_keys[0] == expected_keys[0]
-    recall = len(set(expected_keys[:k]) & set(actual_keys[:k])) / k if k else 1.0
+    # Distinct keys: a ranking by id may list the same title twice in its top k.
+    wanted = set(expected_keys[:k])
+    recall = len(wanted & set(actual_keys[:k])) / len(wanted) if wanted else 1.0
     return Comparison(
         top1_ok=top1_ok,
         recall=recall,
@@ -72,6 +75,25 @@ def compare_results(expected: ResultTable, actual: ResultTable | None) -> Compar
         key_columns=key_columns,
         matched_columns=tuple(actual.columns[index] for index in matched),
         approved=top1_ok and recall >= RECALL_THRESHOLD,
+    )
+
+
+def top1_value_matches(reference: ResultTable, column: str, actual: ResultTable | None) -> bool:
+    """Whether any number in the agent's top-1 row is within 1% of the reference's top-1 value.
+
+    The value may come scaled in the SQL (thousands, millions, billions), so each number is
+    also tried multiplied by 10^3, 10^6 and 10^9.
+    """
+    if actual is None or not actual.rows or not reference.rows or column not in reference.columns:
+        return False
+    expected = reference.rows[0][reference.columns.index(column)]
+    if not _is_number(expected):
+        return False
+    return any(
+        _close(float(value) * scale, float(expected))
+        for value in actual.rows[0]
+        if _is_number(value)
+        for scale in VALUE_SCALES
     )
 
 

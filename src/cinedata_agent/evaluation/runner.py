@@ -14,6 +14,7 @@ from cinedata_agent.cache import AnswerCache, CachedAnswer
 from cinedata_agent.config import Settings
 from cinedata_agent.db.base import Database
 from cinedata_agent.db.errors import DatabaseError
+from cinedata_agent.evaluation.classification import VALUE_CHECKED_QUESTIONS
 from cinedata_agent.evaluation.compare import ResultTable, results_agree
 from cinedata_agent.evaluation.gabarito import EvalQuestion, Reference, judge
 from cinedata_agent.evaluation.report import print_plan, print_run, write_reports
@@ -64,6 +65,9 @@ class QuestionOutcome:
     id: str
     question: str
     approved: bool
+    has_trap: bool
+    # Mandatory top-1 value check (only VALUE_CHECKED_QUESTIONS); None elsewhere.
+    value_check: bool | None
     top1_ok: bool
     recall: float
     k: int
@@ -235,13 +239,16 @@ def _evaluate(
     started = time.perf_counter()
     references, checks, reference_error = _reference_tables(question, deps)
     run = _from_cache(cached) if cached is not None else _ask_agent(question, llm, deps)
-    verdict = judge(references, run.actual) if references else None
+    value_column = VALUE_CHECKED_QUESTIONS.get(question.id)
+    verdict = judge(references, run.actual, value_column) if references else None
     comparison = verdict.comparison if verdict else None
     matched = verdict.matched if verdict else None
     return QuestionOutcome(
         id=question.id,
         question=question.question,
         approved=bool(verdict and verdict.approved and run.error is None),
+        has_trap=question.has_trap,
+        value_check=verdict.value_check if verdict else None,
         top1_ok=bool(comparison and comparison.top1_ok),
         recall=comparison.recall if comparison else 0.0,
         k=comparison.k if comparison else 0,

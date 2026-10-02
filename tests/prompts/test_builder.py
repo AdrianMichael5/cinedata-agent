@@ -193,7 +193,7 @@ class TestPackaging:
 class TestValuesFromSettings:
     def test_default_row_and_time_limits(self, prompt):
         assert "no máximo 200 linhas" in prompt
-        assert "limite de 30 s" in prompt
+        assert "limite de 60 s" in prompt
 
     def test_row_and_time_limits_follow_settings(self, monkeypatch):
         monkeypatch.setenv("MAX_ROWS", "150")
@@ -204,7 +204,7 @@ class TestValuesFromSettings:
         assert "no máximo 150 linhas" in prompt
         assert "limite de 45 s" in prompt
         assert "200 linhas" not in prompt
-        assert "30 s" not in prompt
+        assert "60 s" not in prompt
 
 
 class TestRenderTemplate:

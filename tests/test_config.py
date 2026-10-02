@@ -22,7 +22,7 @@ class TestDefaults:
         assert settings.llm_models == list(DEFAULT_LLM_MODELS)
         assert settings.db_backend == "sqlite"
         assert settings.db_path == Path("data/cinerocket.db")
-        assert settings.query_timeout_seconds == 30
+        assert settings.query_timeout_seconds == 60
         assert settings.max_rows == 200
         assert settings.max_llm_calls_per_question == 3
         assert settings.max_requests_per_question == 6
@@ -52,6 +52,11 @@ class TestDefaults:
         values = [line.split("=", 1)[1] for line in lines if line.startswith("LLM_MODELS=")]
 
         assert values == [",".join(DEFAULT_LLM_MODELS)]
+
+    def test_env_example_sets_the_query_timeout(self):
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+        assert "QUERY_TIMEOUT_SECONDS=60" in lines
 
     def test_env_example_sets_the_request_cap(self):
         lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()

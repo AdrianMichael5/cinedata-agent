@@ -5,6 +5,7 @@ from cinedata_agent.evaluation.compare import (
     compare_results,
     normalize_key,
     results_agree,
+    top1_value_matches,
 )
 
 EXPECTED = ResultTable(
@@ -94,6 +95,18 @@ class TestCompareResults:
 
         assert comparison.recall == pytest.approx(recall)
         assert comparison.approved is approved
+
+    def test_repeated_keys_count_once_in_the_recall(self):
+        # A ranking by id repeats a title when the same film has several ids (Q13's trap).
+        expected = table(
+            ("titulo", "avaliacoes"),
+            [("Die Hart 2", 13), ("Die Hart 2", 12), ("Die Hart 2", 11), ("Rec", 10), ("Up", 9)],
+        )
+
+        comparison = compare_results(expected, expected)
+
+        assert comparison.recall == 1.0
+        assert comparison.approved
 
     def test_short_expected_uses_its_length_as_k(self):
         expected = table(("nome_genero", "filmes"), [("Drama", 10), ("Comedy", 8)])
@@ -188,6 +201,26 @@ class TestCompareResults:
 
         assert comparison.matched_columns == ()
         assert not comparison.approved
+
+
+class TestTop1ValueMatches:
+    def test_scaled_value_matches(self):
+        actual = table(("titulo", "receita_bi"), [("Avatar", 12.39)])
+
+        assert top1_value_matches(EXPECTED, "receita_brl", actual)
+
+    @pytest.mark.parametrize(
+        ("column", "actual"),
+        [
+            ("receita_brl", None),
+            ("receita_brl", table(("titulo", "x"), [])),
+            ("nao_existe", table(("titulo", "x"), [("Avatar", 1.0)])),
+            ("titulo", table(("titulo", "x"), [("Avatar", 1.0)])),
+        ],
+        ids=["no_result", "empty_result", "unknown_column", "text_column"],
+    )
+    def test_nothing_to_compare_is_not_a_match(self, column, actual):
+        assert not top1_value_matches(EXPECTED, column, actual)
 
 
 class TestResultsAgree:

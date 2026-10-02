@@ -10,14 +10,17 @@ from rich.console import Console
 
 from cinedata_agent.cache import AnswerCache
 from cinedata_agent.db.sqlite import SQLiteDatabase
-from cinedata_agent.evaluation.gabarito import load_gabarito
+from cinedata_agent.evaluation.gabarito import Role, load_gabarito
 from cinedata_agent.evaluation.main import _databases, main, parse_args
+from cinedata_agent.evaluation.report import render_markdown
 from cinedata_agent.evaluation.runner import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_REFUSED,
     EvalDependencies,
     EvalOptions,
+    EvalRun,
+    QuestionOutcome,
     evaluation_settings,
     run_evaluation,
 )
@@ -75,6 +78,12 @@ GABARITO = [
 ]
 
 
+TEST_CLASSES = {
+    "Q01": {"Alfabética": Role.TRAP},
+    "Q03": {"Sem filtro": Role.VALID_ALTERNATIVE},
+}
+
+
 def answer(sql: str, text: str = "Resposta.") -> list:
     return [tool_call_message(sql), text_message(text)]
 
@@ -128,7 +137,8 @@ class Harness:
             output_dir=self.output_dir,
             now=lambda: FIXED_NOW,
         )
-        return run_evaluation(load_gabarito(self.gabarito_path), EvalOptions(**values), deps)
+        questions = load_gabarito(self.gabarito_path, classes=TEST_CLASSES)
+        return run_evaluation(questions, EvalOptions(**values), deps)
 
     @property
     def report(self) -> dict[str, Any]:
@@ -200,14 +210,50 @@ class TestApproval:
         assert q03["matched_role"] == "alternativa"
         assert q03["matched_label"] == "Sem filtro"
 
-    def test_variant_alternative_is_recorded_for_other_questions(self, harness):
+    def test_matching_a_trap_is_rejected_and_named(self, harness):
         harness.script = answer(ALPHA_SQL)
 
         harness.run(ids="Q01")
 
         q01 = outcome(harness.report, "Q01")
-        assert q01["matched_role"] == "alternativa"
+        assert q01["approved"] is False
+        assert q01["matched_role"] == "armadilha"
         assert q01["matched_label"] == "Alfabética"
+        assert "caiu na armadilha: Alfabética" in harness.markdown
+        assert "caiu na armadilha: Alfabética" in harness.output.getvalue()
+
+    def test_scoreboard_counts_expected_alternative_trap_and_no_match(self, harness):
+        harness.script = (
+            answer(RECENT_SQL)  # Q01: expected
+            + answer(ALPHA_SQL)  # Q03: valid alternative
+            + answer("SELECT 1 AS x")  # Q04: no match
+        )
+
+        harness.run()
+
+        summary = harness.report["summary"]
+        assert summary["approved_expected"] == 1
+        assert summary["approved_alternative"] == 1
+        assert summary["failed_trap"] == 0
+        assert summary["failed_no_match"] == 1
+        assert summary["trap_questions"] == 1
+        assert summary["traps_avoided"] == 1
+        markdown = harness.markdown
+        assert "Aprovadas pela esperada: 1" in markdown
+        assert "Aprovadas por alternativa válida: 1" in markdown
+        assert "Reprovadas por armadilha: 0" in markdown
+        assert "Reprovadas sem correspondência: 1" in markdown
+        assert "Armadilhas evitadas: 1 de 1" in markdown
+
+    def test_falling_into_a_trap_is_not_counted_as_avoided(self, harness):
+        harness.script = answer(ALPHA_SQL)
+
+        harness.run(ids="Q01")
+
+        summary = harness.report["summary"]
+        assert summary["failed_trap"] == 1
+        assert summary["traps_avoided"] == 0
+        assert "Armadilhas evitadas: 0 de 1" in harness.markdown
 
 
 class TestReferences:
@@ -259,12 +305,29 @@ class TestFailures:
 
 class TestMain:
     def write_eval_dir(self, tmp_path: Path) -> Path:
+        # main() uses the real classification map: ids whose real questions have no variants.
+        entries = [
+            {**item, "id": question_id, "variantes": []}
+            for item, question_id in zip(GABARITO, ("Q06", "Q08", "Q10"), strict=True)
+        ]
+        eval_dir = tmp_path / "eval"
+        eval_dir.mkdir()
+        (eval_dir / "gabarito.json").write_text(
+            json.dumps(entries, ensure_ascii=False), encoding="utf-8"
+        )
+        return eval_dir
+
+    def test_unclassified_variant_is_refused(self, tmp_path, capsys):
         eval_dir = tmp_path / "eval"
         eval_dir.mkdir()
         (eval_dir / "gabarito.json").write_text(
             json.dumps(GABARITO, ensure_ascii=False), encoding="utf-8"
         )
-        return eval_dir
+
+        code = main(["--dry-run"], eval_dir=eval_dir)
+
+        assert code == EXIT_REFUSED
+        assert "não está classificada" in " ".join(capsys.readouterr().out.split())
 
     def test_dry_run_end_to_end_without_a_key(self, tmp_path, capsys):
         eval_dir = self.write_eval_dir(tmp_path)
@@ -449,6 +512,38 @@ class TestOutputs:
         assert "1/2" in markdown
         assert "Barbie lidera." in markdown
         assert RECENT_SQL in markdown
+
+    @pytest.mark.parametrize(("value_check", "label"), [(True, "dentro"), (False, "fora")])
+    def test_markdown_shows_the_mandatory_value_check(self, value_check, label):
+        item = QuestionOutcome(
+            id="Q11",
+            question="Produtora com maior lucro total",
+            approved=value_check,
+            has_trap=True,
+            value_check=value_check,
+            top1_ok=True,
+            recall=1.0,
+            k=5,
+            value_ok=value_check,
+            matched_role="esperada" if value_check else "armadilha",
+            matched_label="Receita e orçamento informados",
+            key_columns=["nome_produtora"],
+            matched_columns=["nome_produtora"],
+            model="m",
+            llm_calls=2,
+            requests=2,
+            elapsed_s=1.0,
+            from_cache=False,
+            sql_executed=[],
+            answer_text="Marvel Studios.",
+            error=None,
+            reference_checks={},
+        )
+        run = EvalRun(FIXED_NOW, FIXED_NOW, "2026-10-01", "completa", None, {}, [item])
+
+        markdown = render_markdown(run)
+
+        assert f"Valor do top 1 (checagem obrigatória): {label} de 1%" in markdown
 
     def test_terminal_table_lists_each_question(self, harness):
         harness.script = answer(RECENT_SQL)

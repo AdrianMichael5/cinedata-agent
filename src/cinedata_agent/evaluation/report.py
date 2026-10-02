@@ -26,15 +26,18 @@ VALUE_LABELS = {True: "dentro de 1%", False: "fora de 1%", None: "não comparáv
 
 def summarize_run(run: EvalRun) -> dict[str, int]:
     questions = run.questions
+    approved = [item for item in questions if item.approved]
+    failed = [item for item in questions if not item.approved]
+    with_trap = [item for item in questions if item.has_trap]
     return {
         "total": len(questions),
-        "approved": sum(1 for item in questions if item.approved),
-        "approved_expected": sum(
-            1 for item in questions if item.approved and item.matched_role == "esperada"
-        ),
-        "approved_alternative": sum(
-            1 for item in questions if item.approved and item.matched_role == "alternativa"
-        ),
+        "approved": len(approved),
+        "approved_expected": sum(1 for item in approved if item.matched_role == "esperada"),
+        "approved_alternative": sum(1 for item in approved if item.matched_role == "alternativa"),
+        "failed_trap": sum(1 for item in failed if item.matched_role == "armadilha"),
+        "failed_no_match": sum(1 for item in failed if item.matched_role != "armadilha"),
+        "trap_questions": len(with_trap),
+        "traps_avoided": sum(1 for item in with_trap if item.matched_role != "armadilha"),
         "from_cache": sum(1 for item in questions if item.from_cache),
         "requests": sum(item.requests for item in questions),
         "errors": sum(1 for item in questions if item.error),
@@ -99,7 +102,11 @@ def print_run(run: EvalRun, console: Console) -> None:
         )
     console.print(table)
     summary = summarize_run(run)
-    console.print(f"Placar: {summary['approved']}/{summary['total']} aprovadas", style="bold")
+    console.print(
+        f"Placar: {summary['approved']}/{summary['total']} aprovadas · armadilhas evitadas: "
+        f"{summary['traps_avoided']} de {summary['trap_questions']}",
+        style="bold",
+    )
     if run.stop_reason:
         console.print(f"Interrompida: {run.stop_reason}", style="yellow", markup=False)
 
@@ -112,9 +119,12 @@ def render_markdown(run: EvalRun) -> str:
         "",
         f"- Execução: {run.started_at:%Y-%m-%d %H:%M} UTC · REFERENCE_DATE {run.reference_date}",
         f"- Status: {run.status}{stop}",
-        f"- Placar: **{summary['approved']}/{summary['total']}** aprovadas "
-        f"({summary['approved_expected']} pela resposta esperada, "
-        f"{summary['approved_alternative']} por alternativa)",
+        f"- Placar: **{summary['approved']}/{summary['total']}** aprovadas",
+        f"  - Aprovadas pela esperada: {summary['approved_expected']}",
+        f"  - Aprovadas por alternativa válida: {summary['approved_alternative']}",
+        f"  - Reprovadas por armadilha: {summary['failed_trap']}",
+        f"  - Reprovadas sem correspondência: {summary['failed_no_match']}",
+        f"- Armadilhas evitadas: {summary['traps_avoided']} de {summary['trap_questions']}",
         f"- Requisições ao OpenRouter: {summary['requests']} · do cache: {summary['from_cache']}",
         "",
         "| ID | Aprovada | Top 1 | Recall | Bateu com | Modelo | Requisições | Tempo |",
@@ -144,6 +154,8 @@ def _question_details(item: QuestionOutcome) -> list[str]:
         f"{', '.join(item.matched_columns) or 'nenhuma'}",
         f"- Referências: {references or '-'}",
     ]
+    if item.value_check is not None:
+        lines.append(f"- Valor do top 1 (checagem obrigatória): {VALUE_LABELS[item.value_check]}")
     if item.error:
         lines.append(f"- Erro: {item.error}")
     lines += ["", "SQL executada:", ""]
@@ -156,6 +168,8 @@ def _question_details(item: QuestionOutcome) -> list[str]:
 def _matched(item: QuestionOutcome) -> str:
     if item.matched_role is None:
         return "nenhuma"
+    if item.matched_role == "armadilha":
+        return f"caiu na armadilha: {item.matched_label}"
     return f"{item.matched_role}: {item.matched_label}"
 
 
