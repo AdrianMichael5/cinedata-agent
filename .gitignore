@@ -25,7 +25,7 @@ dist/
 .cache/
 logs/
 
-# Execuções da avaliação (o eval/results/latest.md é versionado)
+# Os JSON de eval/results ficam locais; eval/results/latest.md não é ignorado e é versionado só depois do eval final
 eval/results/*.json
 .vscode/
 Thumbs.db
