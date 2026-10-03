@@ -111,6 +111,30 @@ cinedata --version
 - `cache clear`: apaga as respostas guardadas.
 - `--version` (ou `-V`): mostra a versão instalada.
 
+## API HTTP (opcional)
+
+Instale o extra `api` e suba o servidor:
+
+```bash
+pip install -e ".[api]"
+uvicorn cinedata_agent.api:create_app --factory
+```
+
+- `POST /api/v1/ask` recebe `{"question": "...", "no_cache": false}` e devolve `answer`, `sql`, `model`, `llm_calls`, `requests`, `from_cache` e `warning`. Usa o mesmo agente e o mesmo cache da CLI.
+- `GET /health` devolve `{"status": "ok", "db": "ok"}`, ou HTTP 503 com `"erro"` quando o banco não responde.
+- Erros: pergunta vazia → 422; cota diária esgotada → 429; chave inválida ou falha do OpenRouter → 502.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ask -H "Content-Type: application/json" \
+  -d '{"question": "Quantos filmes de terror foram lançados em 2023?"}'
+```
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/ask `
+  -ContentType "application/json; charset=utf-8" `
+  -Body '{"question": "Quantos filmes de terror foram lançados em 2023?"}'
+```
+
 ## Exemplos reais
 
 <!-- PREENCHER APÓS EVAL -->
@@ -191,6 +215,7 @@ Placar: <!-- PREENCHER APÓS EVAL -->
 cinedata-agent/
 ├── src/cinedata_agent/
 │   ├── agent.py          # loop de tool calling, orçamento, respostas degeneradas
+│   ├── api.py            # API HTTP opcional (FastAPI)
 │   ├── cache.py          # cache de respostas em disco
 │   ├── cli.py            # comandos do typer
 │   ├── config.py         # configuração via .env e variáveis de ambiente
