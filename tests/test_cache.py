@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import cinedata_agent.cache as cache_module
 from cinedata_agent.agent import AgentAnswer, SqlRecord
 from cinedata_agent.cache import AnswerCache, CacheKeyParts, cache_key, normalize_question
 from cinedata_agent.config import Settings
@@ -256,3 +257,23 @@ def test_cache_dir_comes_from_settings(tmp_path):
     assert cache.directory == Path(tmp_path / "meu-cache")
     assert cache.max_rows == settings.max_rows
     assert cache.max_llm_calls == settings.max_llm_calls_per_question
+
+
+def test_concurrent_writers_use_distinct_temporary_files(tmp_path, monkeypatch):
+    cache = AnswerCache(tmp_path / ".cache", max_rows=200, max_llm_calls=MAX_LLM_CALLS)
+    sources: list[str] = []
+    real_replace = cache_module.os.replace
+
+    def recording_replace(source: Any, target: Any) -> None:
+        sources.append(str(source))
+        real_replace(source, target)
+
+    monkeypatch.setattr(cache_module.os, "replace", recording_replace)
+    key = cache.key_for(make_settings(), "Mesma pergunta")
+
+    assert cache.put(key, "Mesma pergunta", make_answer(), 1)
+    assert cache.put(key, "Mesma pergunta", make_answer(), 1)
+
+    assert len(sources) == 2
+    assert sources[0] != sources[1]
+    assert list((tmp_path / ".cache").rglob("*.tmp")) == []

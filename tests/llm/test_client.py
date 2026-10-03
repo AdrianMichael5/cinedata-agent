@@ -1028,3 +1028,14 @@ class TestLogging:
 
         assert FAKE_KEY not in caplog.text
         assert FAKE_KEY not in str(caught.value)
+
+
+class TestClose:
+    def test_close_releases_the_http_client(self):
+        settings = Settings(_env_file=None, openrouter_api_key=FAKE_KEY, llm_models=MODELS)
+        http_client = httpx2.Client(transport=httpx2.MockTransport(lambda request: ok(MODELS[0])))
+        client = LLMClient(settings, http_client=http_client)
+
+        client.close()
+
+        assert http_client.is_closed

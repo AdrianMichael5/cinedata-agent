@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,18 @@ pytest.importorskip("fastapi")
 from fakes import FAKE_MODEL, FakeLLM, text_message, tool_call_message  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from cinedata_agent.api import create_app  # noqa: E402
+from cinedata_agent.api import (  # noqa: E402
+    AUTH_MESSAGE,
+    DATABASE_MESSAGE,
+    OPENROUTER_MESSAGE,
+    create_app,
+)
 from cinedata_agent.config import Settings  # noqa: E402
 from cinedata_agent.db.sqlite import SQLiteDatabase  # noqa: E402
 from cinedata_agent.llm.errors import (  # noqa: E402
     AllModelsFailedError,
     AuthenticationError,
+    OpenRouterAPIError,
     QuotaExhaustedError,
 )
 
@@ -110,14 +117,67 @@ class TestAsk:
         assert response.status_code == 429
         assert response.json()["detail"] == "Cota esgotada."
 
-    def test_invalid_key_is_502_with_a_clear_message(self, tmp_path, sample_db):
-        client, _ = make_client(tmp_path, sample_db, [AuthenticationError("Chave inválida.")])
+    def test_invalid_key_is_502_with_a_clear_fixed_message(self, tmp_path, sample_db):
+        error = AuthenticationError("detalhe interno sk-or-123")
+        client, _ = make_client(tmp_path, sample_db, [error])
 
         response = client.post("/api/v1/ask", json={"question": QUESTION})
 
         assert response.status_code == 502
-        assert "Chave inválida." in response.json()["detail"]
+        assert response.json()["detail"] == AUTH_MESSAGE
         assert "OPENROUTER_API_KEY" in response.json()["detail"]
+        assert "sk-or-123" not in response.text
+
+    def test_other_openrouter_failures_return_a_fixed_502(self, tmp_path, sample_db):
+        error = OpenRouterAPIError("HTTP 400 com corpo interno do provedor")
+        client, _ = make_client(tmp_path, sample_db, [error])
+
+        response = client.post("/api/v1/ask", json={"question": QUESTION})
+
+        assert response.status_code == 502
+        assert response.json()["detail"] == OPENROUTER_MESSAGE
+        assert "corpo interno" not in response.text
+
+    def test_missing_database_returns_503_without_the_server_path(self, tmp_path):
+        missing = tmp_path / "segredo" / "cinerocket.db"
+        app = create_app(
+            settings=make_settings(tmp_path),
+            make_database=lambda: SQLiteDatabase(missing, timeout_seconds=5, max_rows=10),
+            make_llm=lambda: FakeLLM([]),
+        )
+
+        response = TestClient(app).post("/api/v1/ask", json={"question": QUESTION})
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == DATABASE_MESSAGE
+        assert "segredo" not in response.text
+
+    def test_mapped_errors_are_logged_on_the_server(self, tmp_path, sample_db, caplog):
+        error = AuthenticationError("detalhe interno")
+        client, _ = make_client(tmp_path, sample_db, [error])
+
+        with caplog.at_level(logging.WARNING, logger="cinedata_agent.api"):
+            client.post("/api/v1/ask", json={"question": QUESTION})
+
+        records = [r for r in caplog.records if r.name == "cinedata_agent.api"]
+        assert records
+        assert records[0].levelno == logging.WARNING
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[1] is error
+
+    def test_llm_client_is_closed_after_an_answer(self, tmp_path, sample_db):
+        client, llms = make_client(tmp_path, sample_db, answered())
+
+        client.post("/api/v1/ask", json={"question": QUESTION})
+
+        assert llms[0].closed is True
+
+    def test_llm_client_is_closed_after_an_error(self, tmp_path, sample_db):
+        client, llms = make_client(tmp_path, sample_db, [AuthenticationError("x")])
+
+        client.post("/api/v1/ask", json={"question": QUESTION})
+
+        assert llms[0].closed is True
 
     def test_answer_with_warning_is_200_with_the_warning(self, tmp_path, sample_db):
         outage = AllModelsFailedError([("a/model:free", "HTTP 503")])

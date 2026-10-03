@@ -1,4 +1,7 @@
-"""Optional HTTP API (extra `api`): uvicorn cinedata_agent.api:create_app --factory."""
+"""Optional HTTP API (extra `api`): uvicorn cinedata_agent.api:create_app --factory.
+
+No authentication: bind it to localhost only, or anyone who reaches it spends the quota.
+"""
 
 import logging
 from collections.abc import Callable
@@ -21,10 +24,23 @@ logger = logging.getLogger(__name__)
 
 HEALTH_SQL = "SELECT 1"
 
+# Fixed client-facing texts: error details (file paths, provider bodies) stay in the server log.
+AUTH_MESSAGE = (
+    "O OpenRouter recusou a chave da API. Confira OPENROUTER_API_KEY no .env do servidor."
+)
+OPENROUTER_MESSAGE = "O OpenRouter não conseguiu responder agora. Tente de novo em alguns minutos."
+DATABASE_MESSAGE = "O banco de dados não está disponível no servidor."
+NOT_IMPLEMENTED_MESSAGE = "O backend de banco configurado ainda não foi implementado."
+UNEXPECTED_MESSAGE = "Erro inesperado no servidor."
+
 
 class CountingChatModel(ChatModel, Protocol):
+    """A chat model that counts its HTTP requests and releases its connections."""
+
     @property
     def requests_sent(self) -> int: ...
+
+    def close(self) -> None: ...
 
 
 class AskRequest(BaseModel):
@@ -70,6 +86,7 @@ def create_app(
     # Sync handlers on purpose: FastAPI runs them in a thread, since the agent and SQLite block.
     @app.post("/api/v1/ask", response_model=AskResponse)
     def ask(request: AskRequest) -> AskResponse:
+        llm: CountingChatModel | None = None
         try:
             key = cache.key_for(config, request.question)
             cached = None if request.no_cache else cache.get(key)
@@ -86,6 +103,9 @@ def create_app(
             answer = Agent(config, database_factory(), llm).ask(request.question)
         except Exception as error:
             raise _http_error(error) from error
+        finally:
+            if llm is not None:
+                llm.close()
         cache.put(key, request.question, answer, llm.requests_sent)
         return AskResponse(
             answer=answer.text,
@@ -101,7 +121,8 @@ def create_app(
     def health() -> JSONResponse:
         try:
             database_factory().run_query(HEALTH_SQL)
-        except DatabaseError:
+        except DatabaseError as error:
+            logger.warning("Health check failed: database unavailable", exc_info=error)
             body = HealthResponse(status="erro", db="erro")
             return JSONResponse(body.model_dump(), status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
         return JSONResponse(HealthResponse(status="ok", db="ok").model_dump())
@@ -110,21 +131,20 @@ def create_app(
 
 
 def _http_error(error: Exception) -> HTTPException:
+    """Map an error to a status and a fixed message; the detail goes to the server log."""
     if isinstance(error, QuotaExhaustedError):
-        return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(error))
-    if isinstance(error, AuthenticationError):
-        return HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            f"O OpenRouter recusou a chave da API: {error} "
-            "Confira OPENROUTER_API_KEY no .env do servidor.",
-        )
-    if isinstance(error, OpenRouterError):
-        return HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
-    if isinstance(error, DatabaseError):
-        return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error))
-    if isinstance(error, NotImplementedError):
-        return HTTPException(status.HTTP_501_NOT_IMPLEMENTED, str(error))
-    logger.exception("Unexpected error in /api/v1/ask")
-    return HTTPException(
-        status.HTTP_500_INTERNAL_SERVER_ERROR, f"Erro inesperado ({type(error).__name__})."
-    )
+        # Written by this project (reset time only), so it is safe to show.
+        code, message = status.HTTP_429_TOO_MANY_REQUESTS, str(error)
+    elif isinstance(error, AuthenticationError):
+        code, message = status.HTTP_502_BAD_GATEWAY, AUTH_MESSAGE
+    elif isinstance(error, OpenRouterError):
+        code, message = status.HTTP_502_BAD_GATEWAY, OPENROUTER_MESSAGE
+    elif isinstance(error, DatabaseError):
+        code, message = status.HTTP_503_SERVICE_UNAVAILABLE, DATABASE_MESSAGE
+    elif isinstance(error, NotImplementedError):
+        code, message = status.HTTP_501_NOT_IMPLEMENTED, NOT_IMPLEMENTED_MESSAGE
+    else:
+        logger.error("Unexpected error in /api/v1/ask", exc_info=error)
+        return HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, UNEXPECTED_MESSAGE)
+    logger.warning("/api/v1/ask answered HTTP %d: %s", code, type(error).__name__, exc_info=error)
+    return HTTPException(code, message)

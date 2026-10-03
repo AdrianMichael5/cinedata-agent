@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -138,7 +139,8 @@ class AnswerCache:
             "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         path = self._path(key)
-        temporary = path.with_suffix(".json.tmp")
+        # Unique per write: two concurrent writers of the same key must not share a temp file.
+        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # default=str: BLOB or date values must not make the whole entry unwritable.
@@ -147,6 +149,7 @@ class AnswerCache:
             os.replace(temporary, path)
         except OSError as error:
             logger.warning("Could not write the cache entry %s: %s", path.name, error)
+            temporary.unlink(missing_ok=True)
             return False
         return True
 

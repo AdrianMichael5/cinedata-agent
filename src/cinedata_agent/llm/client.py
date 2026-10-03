@@ -145,6 +145,10 @@ class LLMClient:
         """Requests sent since this client was created, successful or not."""
         return self._requests_sent
 
+    def close(self) -> None:
+        """Release the HTTP connection pool; a long-running server must not wait for GC."""
+        self._openai.close()
+
     def complete(
         self,
         messages: Sequence[ChatCompletionMessageParam],

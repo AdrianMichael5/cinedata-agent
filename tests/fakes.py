@@ -69,6 +69,11 @@ class FakeLLM:
     def requests_sent(self) -> int:
         return len(self.calls)
 
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
     def complete(
         self,
         messages: Sequence[Any],

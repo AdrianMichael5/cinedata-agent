@@ -122,7 +122,8 @@ uvicorn cinedata_agent.api:create_app --factory
 
 - `POST /api/v1/ask` recebe `{"question": "...", "no_cache": false}` e devolve `answer`, `sql`, `model`, `llm_calls`, `requests`, `from_cache` e `warning`. Usa o mesmo agente e o mesmo cache da CLI.
 - `GET /health` devolve `{"status": "ok", "db": "ok"}`, ou HTTP 503 com `"erro"` quando o banco não responde.
-- Erros: pergunta vazia → 422; cota diária esgotada → 429; chave inválida ou falha do OpenRouter → 502.
+- Erros: pergunta vazia → 422; cota diária esgotada → 429; chave inválida ou falha do OpenRouter → 502; banco indisponível → 503. As mensagens ao cliente são fixas, e o detalhe de cada erro vai para o log do servidor.
+- **Use só em localhost.** A API não tem autenticação nem limite de requisições: qualquer cliente que alcance o servidor consome a cota diária do OpenRouter. O uvicorn escuta em `127.0.0.1` por padrão; não use `--host 0.0.0.0`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/ask -H "Content-Type: application/json" \
