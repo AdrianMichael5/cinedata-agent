@@ -171,9 +171,52 @@ class TestOctoberCorrections:
         assert "A primeira SQL já deve responder à pergunta." in prompt
 
 
+class TestRatingProfitAndRankingRules:
+    """Rules added after the 2026-10-03 eval: IMDb as the default rating, top-10 rankings even
+    for singular questions, profit as a rule of its own, and review thresholds counted per id."""
+
+    def test_unqualified_rating_defaults_to_imdb(self, prompt):
+        assert "sem qualificação é `nota_imdb`" in prompt
+        assert "Use `nota_tmdb` só se o usuário pedir TMDB ou comparar as duas bases" in prompt
+
+    def test_user_ratings_come_from_movie_reviews(self, prompt):
+        assert "avaliações dos usuários" in prompt
+        assert "`movie_reviews.rating`" in prompt
+
+    def test_rankings_never_use_limit_one(self, prompt):
+        assert "nunca use `LIMIT 1`" in prompt
+
+    def test_singular_rankings_still_return_a_table(self, prompt):
+        assert "mesmo quando a pergunta está no singular" in prompt
+        assert "a primeira linha da resposta destaca o primeiro colocado" in prompt.lower()
+
+    def test_profit_has_its_own_filter_rule(self, prompt):
+        assert "toda soma, média ou ranking de lucro exige" in prompt
+        assert "`receita_usd > 0 AND orcamento_usd > 0`" in prompt
+        assert "mesmo que a pergunta não diga" in prompt
+
+    def test_revenue_and_budget_alone_do_not_need_the_profit_filter(self, prompt):
+        assert "Receita e orçamento, quando mostrados sozinhos, não exigem esse filtro" in prompt
+
+    def test_margin_and_roi_keep_the_revenue_and_budget_filter(self, prompt):
+        assert "**Margem e ROI** (só com `receita_usd > 0 AND orcamento_usd > 0`)" in prompt
+
+    def test_review_thresholds_are_counted_per_movie_id(self, prompt):
+        assert "contadas por `sk_movie_id` (não por obra)" in prompt
+
+    def test_obra_counting_scope_excludes_review_thresholds(self, prompt):
+        assert "Limiares de quantidade de avaliações não são contagem por obra" in prompt
+
+
 class TestExamples:
-    def test_has_five_examples(self, prompt):
-        assert len(prompt_examples(prompt)) == 5
+    def test_has_six_examples(self, prompt):
+        assert len(prompt_examples(prompt)) == 6
+
+    def test_singular_ranking_example_returns_ten_rows(self, prompt):
+        example = prompt_examples(prompt)[5]
+
+        assert example.question.startswith("Qual a produtora")
+        assert example.sql.endswith("LIMIT 10")
 
     def test_example_questions_differ_from_the_gabarito(self, prompt):
         gabarito = json.loads(GABARITO_PATH.read_text(encoding="utf-8"))
@@ -191,6 +234,7 @@ class TestExamples:
 
         assert "{{NOMES_INVALIDOS}}" in examples[0].sql
         assert "{{NOMES_INVALIDOS}}" in examples[4].sql
+        assert "{{NOMES_INVALIDOS}}" in examples[5].sql
 
     def test_company_margin_example_counts_works(self, prompt):
         company_example = prompt_examples(prompt)[4].sql
