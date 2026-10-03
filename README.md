@@ -168,7 +168,7 @@ Placar: <!-- PREENCHER APÓS EVAL -->
 - **Cópias do mesmo filme com datas diferentes.** A chave de obra (título + data) não junta essas cópias. O agente cita isso quando afeta a resposta.
 - **Outliers financeiros.** Há orçamentos de US$ 1 e receitas minúsculas. Os filtros mínimos reduzem o problema, mas não cobrem todos os casos.
 - **Variação dos modelos gratuitos.** Qualidade, latência e disponibilidade mudam ao longo do dia (há respostas 429 de capacidade do provedor). Respostas podem variar entre execuções.
-- **Consultas com duas junções de pessoas.** A SQL do agente para a dupla ator–diretor levou cerca de 55 s no banco real, e uma variante que filtrava cedo levou cerca de 3 min. Por isso o limite padrão é de 120 s.
+- **Consultas com duas junções de pessoas.** A SQL do agente para a dupla ator–diretor levou cerca de 55 s no banco real. Na mesma pergunta, filtrar por papel e período em CTEs antes de juntar levou de 39 a 48 s, e as junções diretas levaram de 178 a 188 s, acima do limite padrão de 120 s.
 - **Dados de 2024 e 2025.** Há poucos filmes lançados nesses anos, e quase nenhum em 2025.
 - **Q08: contagem de obras e de ids.** A referência conta linhas por `sk_movie_id`; o agente conta obras distintas (título + data), conforme a regra do projeto. Um diretor cujos filmes incluem cópias da mesma obra pode ficar abaixo do mínimo de 5 no agente e dentro dele na referência (caso de Scott Wozniak: 5 ids, 4 obras).
 
