@@ -1,11 +1,34 @@
 """Terminal rendering of query results."""
 
+from collections.abc import Callable
 from typing import Any
 
 from rich.table import Table
 from rich.text import Text
 
 from cinedata_agent.db.base import QueryResult
+
+SQL_WAIT_LABEL = "Executando SQL…"
+SQL_WAIT_HINT = "consultas com duas junções de pessoas podem levar até 1 minuto"
+SQL_WAIT_HINT_SECONDS = 10
+
+
+def sql_wait_text(elapsed: float) -> str:
+    seconds = int(elapsed)
+    if elapsed < SQL_WAIT_HINT_SECONDS:
+        return f"{SQL_WAIT_LABEL} ({SQL_WAIT_HINT}) {seconds} s"
+    return f"{SQL_WAIT_LABEL} {seconds} s"
+
+
+class SqlWait:
+    """Rich renders this on every refresh, so the timer keeps moving while the query runs."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._started = clock()
+
+    def __rich__(self) -> Text:
+        return Text(sql_wait_text(self._clock() - self._started))
 
 
 def format_value(value: Any) -> Text:

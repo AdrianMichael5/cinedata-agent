@@ -37,6 +37,17 @@ class RequestRecord:
 
 
 @dataclass(frozen=True)
+class SqlTimingRecord:
+    """One line per answered question: database time, kept apart from the request records."""
+
+    timestamp: str
+    question_id: str
+    sql_ms: int
+    queries: int
+    type: str = "sql"
+
+
+@dataclass(frozen=True)
 class RequestSummary:
     day: date | None
     total: int
@@ -49,7 +60,7 @@ class RequestLog:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def append(self, record: RequestRecord) -> None:
+    def append(self, record: RequestRecord | SqlTimingRecord) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as file:

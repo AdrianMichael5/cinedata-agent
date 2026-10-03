@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from cinedata_agent.config import Settings
 from cinedata_agent.db.base import Database, QueryResult
 from cinedata_agent.db.errors import QueryExecutionError, QueryTimeoutError, UnsafeQueryError
 from cinedata_agent.db.schema import expand_macros
+from cinedata_agent.formatting import SQL_WAIT_LABEL
 from cinedata_agent.llm.client import OK_OUTCOME, LLMResponse
 from cinedata_agent.llm.errors import AllModelsFailedError, RequestBudgetExceededError
 from cinedata_agent.prompts.builder import build_system_prompt
@@ -71,6 +73,8 @@ DEGENERATE_ANSWER_NUDGE = (
 # reasoning in English before the answer, or simply never stops writing.
 DEGENERATE_MAX_CHARS = 6000
 DEGENERATE_MIN_REPEATS = 20
+
+SQL_CLOCK: Callable[[], float] = time.perf_counter
 LEAKED_REASONING_MARKERS = ("I need to", "Let's", "The query returned", "We need")
 
 
@@ -151,6 +155,9 @@ class AgentAnswer:
     sql_log: list[SqlRecord] = field(default_factory=list)
     # Why the answer is incomplete (budget spent, empty answer, LLM down); None when complete.
     warning: str | None = None
+    question_id: str = ""
+    # Milliseconds spent inside the database for this question, summed over every query.
+    sql_ms: int = 0
 
 
 @dataclass
@@ -163,6 +170,7 @@ class _Conversation:
     sql_executed: list[str] = field(default_factory=list)
     sql_log: list[SqlRecord] = field(default_factory=list)
     last_result: QueryResult | None = None
+    sql_ms: int = 0
     model_used: str | None = None
     llm_calls: int = 0
     # HTTP requests sent for this question (fallback attempts included) and why they failed.
@@ -344,15 +352,18 @@ class Agent:
 
     def _execute(self, conversation: _Conversation, query: str) -> str:
         """Run one query; recoverable errors become text the model can read and fix."""
-        self._progress("Executando SQL…")
+        self._progress(SQL_WAIT_LABEL)
         try:
             expanded = expand_macros(query)
         except UnsafeQueryError as error:
             return _reject(conversation, query, error)
+        started = SQL_CLOCK()
         try:
             result = self._db.run_query(expanded)
         except RECOVERABLE_QUERY_ERRORS as error:
             return _reject(conversation, expanded, error)
+        finally:
+            conversation.sql_ms += round((SQL_CLOCK() - started) * 1000)
         executed = result.sql or expanded
         conversation.sql_executed.append(executed)
         conversation.sql_log.append(SqlRecord(sql=executed))
@@ -462,4 +473,6 @@ def _answer(conversation: _Conversation, text: str) -> AgentAnswer:
         llm_calls=conversation.llm_calls,
         last_result=conversation.last_result,
         warning=conversation.warning,
+        question_id=conversation.question_id,
+        sql_ms=conversation.sql_ms,
     )

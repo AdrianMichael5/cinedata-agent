@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from typing import Annotated, NoReturn
@@ -17,7 +18,7 @@ from cinedata_agent.cache import AnswerCache, CachedAnswer
 from cinedata_agent.config import Settings, get_settings
 from cinedata_agent.db.errors import DatabaseError
 from cinedata_agent.db.factory import get_database
-from cinedata_agent.formatting import result_summary, result_table
+from cinedata_agent.formatting import SQL_WAIT_LABEL, SqlWait, result_summary, result_table
 from cinedata_agent.llm.client import LLMClient
 from cinedata_agent.llm.errors import OpenRouterError
 from cinedata_agent.llm.openrouter_account import (
@@ -29,7 +30,13 @@ from cinedata_agent.llm.openrouter_account import (
     make_http_client,
     next_quota_reset,
 )
-from cinedata_agent.llm.request_log import read_records, summarize
+from cinedata_agent.llm.request_log import (
+    RequestLog,
+    SqlTimingRecord,
+    now_utc_iso,
+    read_records,
+    summarize,
+)
 
 app = typer.Typer(
     help="Agente Text-to-SQL do catálogo CineData.",
@@ -141,6 +148,7 @@ def ask(
     )
     if show_sql:
         _print_sql(answer.sql_log)
+    log_sql_timing(settings, answer)
     # --no-cache skips the lookup only: a fresh complete answer still refreshes the entry.
     cache.put(key, question, answer, requests_sent)
 
@@ -154,7 +162,7 @@ def _run_agent(settings: Settings, question: str) -> tuple[AgentAnswer, int]:
         with err_console.status("Preparando…") as status:
 
             def progress(text: str) -> None:
-                status.update(text)
+                status.update(SqlWait(time.monotonic) if text == SQL_WAIT_LABEL else text)
 
             # Database first: a missing file must fail before any request is spent.
             database = get_database(settings)
@@ -182,6 +190,19 @@ def _print_cached_answer(cached: CachedAnswer, show_sql: bool) -> None:
     )
     if show_sql:
         _print_sql([SqlRecord(sql=sql) for sql in cached.sql_executed])
+
+
+def log_sql_timing(settings: Settings, answer: AgentAnswer) -> None:
+    if not answer.sql_log:
+        return
+    RequestLog(settings.request_log_path).append(
+        SqlTimingRecord(
+            timestamp=now_utc_iso(),
+            question_id=answer.question_id,
+            sql_ms=answer.sql_ms,
+            queries=len(answer.sql_log),
+        )
+    )
 
 
 def _footer(model: str | None, llm_calls: int, requests_sent: int) -> str:
