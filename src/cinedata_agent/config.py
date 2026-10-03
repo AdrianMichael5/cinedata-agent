@@ -40,8 +40,9 @@ class Settings(BaseSettings):
 
     db_backend: DbBackend = "sqlite"
     db_path: Path = Path("data/cinerocket.db")
-    # 60 s: the reference SQL of Q09 (actor-director pairs) alone takes about 36 s.
-    query_timeout_seconds: int = Field(default=60, gt=0)
+    # 120 s: an actor-director pair query over bridge_movie_person takes about 55 s on the real
+    # database, so the 60 s default left almost no margin.
+    query_timeout_seconds: int = Field(default=120, gt=0)
     max_rows: int = Field(default=200, gt=0)
 
     max_llm_calls_per_question: int = Field(default=3, gt=0)

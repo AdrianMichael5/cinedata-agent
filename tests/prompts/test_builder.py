@@ -208,6 +208,35 @@ class TestRatingProfitAndRankingRules:
         assert "Limiares de quantidade de avaliações não são contagem por obra" in prompt
 
 
+class TestNoEvalReferences:
+    def test_prompt_never_mentions_the_gabarito(self, prompt):
+        assert "gabarito" not in prompt.lower()
+
+    def test_prompt_never_mentions_the_eval(self, prompt):
+        assert re.search(r"\beval\b", prompt, re.IGNORECASE) is None
+
+    def test_margin_currency_rule_is_self_contained(self, prompt):
+        assert "Use sempre as colunas `_usd`: em R$ cada filme tem uma cotação diferente" in prompt
+
+
+class TestProducersAndPerformance:
+    def test_producer_counts_are_counted_by_work(self, prompt):
+        assert "por pessoa, por dupla, por produtora e em" in prompt
+
+    def test_performance_filters_early_by_role_and_period(self, prompt):
+        assert (
+            "Filtre cedo, numa CTE, por papel (`tipo_pessoa`) e por período "
+            "antes de juntar a segunda bridge"
+        ) in prompt
+
+    def test_performance_joins_people_once_per_role(self, prompt):
+        assert "junte pessoas só uma vez por papel" in prompt
+
+    def test_performance_prefers_sk_keys_and_avoids_text_distinct(self, prompt):
+        assert "use as chaves `sk_*`" in prompt
+        assert "evite `DISTINCT` sobre colunas de texto antes de agregar" in prompt
+
+
 class TestExamples:
     def test_has_six_examples(self, prompt):
         assert len(prompt_examples(prompt)) == 6
@@ -270,7 +299,7 @@ class TestPackaging:
 class TestValuesFromSettings:
     def test_default_row_and_time_limits(self, prompt):
         assert "no máximo 200 linhas" in prompt
-        assert "limite de 60 s" in prompt
+        assert "limite de 120 s" in prompt
 
     def test_row_and_time_limits_follow_settings(self, monkeypatch):
         monkeypatch.setenv("MAX_ROWS", "150")
