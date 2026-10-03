@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from cinedata_agent.api import (  # noqa: E402
     AUTH_MESSAGE,
     DATABASE_MESSAGE,
+    NOT_IMPLEMENTED_MESSAGE,
     OPENROUTER_MESSAGE,
+    UNEXPECTED_MESSAGE,
     create_app,
 )
 from cinedata_agent.config import Settings  # noqa: E402
@@ -164,6 +166,36 @@ class TestAsk:
         assert records[0].levelno == logging.WARNING
         assert records[0].exc_info is not None
         assert records[0].exc_info[1] is error
+
+    def test_unimplemented_backend_is_501_without_asking_the_model(self, tmp_path, sample_db):
+        llms: list[FakeLLM] = []
+        app = create_app(
+            settings=make_settings(tmp_path, db_backend="databricks"),
+            make_database=lambda: SQLiteDatabase(sample_db, timeout_seconds=5, max_rows=10),
+            make_llm=lambda: llms.append(FakeLLM([])) or llms[-1],
+        )
+
+        response = TestClient(app).post("/api/v1/ask", json={"question": QUESTION})
+
+        assert response.status_code == 501
+        assert response.json()["detail"] == NOT_IMPLEMENTED_MESSAGE
+        assert llms == []
+
+    def test_unexpected_error_is_a_fixed_500_and_logged(self, tmp_path, sample_db, caplog):
+        boom = RuntimeError("detalhe interno do servidor")
+        client, llms = make_client(tmp_path, sample_db, [boom])
+
+        with caplog.at_level(logging.ERROR, logger="cinedata_agent.api"):
+            response = client.post("/api/v1/ask", json={"question": QUESTION})
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == UNEXPECTED_MESSAGE
+        assert "detalhe interno" not in response.text
+        records = [r for r in caplog.records if r.name == "cinedata_agent.api"]
+        assert records[0].levelno == logging.ERROR
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[1] is boom
+        assert llms[0].closed is True
 
     def test_llm_client_is_closed_after_an_answer(self, tmp_path, sample_db):
         client, llms = make_client(tmp_path, sample_db, answered())
