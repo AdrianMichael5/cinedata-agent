@@ -33,8 +33,10 @@ def test_sqlite_backend_does_not_import_databricks(monkeypatch, sample_db):
     assert DATABRICKS_MODULE not in sys.modules
 
 
-def test_databricks_backend_is_an_optional_extra(monkeypatch):
+def test_databricks_backend_is_not_implemented(monkeypatch):
     settings = make_settings(monkeypatch, DB_BACKEND="databricks")
 
-    with pytest.raises(NotImplementedError, match="extra opcional"):
+    with pytest.raises(NotImplementedError, match="ainda não foi implementado") as error:
         get_database(settings)
+
+    assert "extra" not in str(error.value)

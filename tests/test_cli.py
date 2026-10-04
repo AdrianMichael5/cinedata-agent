@@ -427,13 +427,15 @@ class TestSqlCommand:
         assert result.exit_code == 1
         assert "cinerocket.db" in result.output
 
-    def test_databricks_backend_reports_optional_extra(self, monkeypatch):
+    def test_databricks_backend_reports_not_implemented(self, monkeypatch):
         monkeypatch.setenv("DB_BACKEND", "databricks")
 
         result = runner.invoke(app, ["sql", "SELECT 1"])
 
         assert result.exit_code == 1
-        assert "extra opcional" in result.output
+        output = " ".join(result.output.split())
+        assert "ainda não foi implementado" in output
+        assert "extra" not in output
 
 
 class TestQuotaCommand:

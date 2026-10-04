@@ -6,7 +6,7 @@ from cinedata_agent.db.sqlite import SQLiteDatabase
 
 
 def get_database(settings: Settings) -> Database:
-    """Build the configured backend; Databricks is imported lazily because it is optional."""
+    """Build the configured backend; the Databricks placeholder is imported only when chosen."""
     if settings.db_backend == "databricks":
         from cinedata_agent.db.databricks import create_database
 

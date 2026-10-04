@@ -32,9 +32,6 @@ api = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
 ]
-databricks = [
-    "databricks-sql-connector>=3.0",
-]
 
 [project.scripts]
 cinedata = "cinedata_agent.cli:app"
@@ -59,11 +56,6 @@ python_version = "3.12"
 files = ["src"]
 warn_redundant_casts = true
 warn_unused_ignores = true
-
-[[tool.mypy.overrides]]
-# Optional extra (databricks-sql-connector) ships no type information.
-module = ["databricks", "databricks.*"]
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
