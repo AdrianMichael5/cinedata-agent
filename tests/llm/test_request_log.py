@@ -3,6 +3,7 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import typer
 from typer.testing import CliRunner
 
 from cinedata_agent.cli import app
@@ -129,6 +130,14 @@ class TestRequestsCommand:
 
         assert result.exit_code == 0
         assert "Total: 2" in " ".join(result.output.split())
+
+    def test_today_help_says_the_quota_day_starts_at_midnight_utc(self):
+        command = typer.main.get_command(app)
+        requests_command = command.commands["requests"]
+        option = next(param for param in requests_command.params if param.name == "today")
+
+        assert "00h UTC" in option.help
+        assert "21h em Brasília" in option.help
 
     def test_missing_log_says_so(self):
         result = runner.invoke(app, ["requests", "--today"])

@@ -238,7 +238,10 @@ def cache_clear() -> None:
 @app.command(help="Soma as requisições ao OpenRouter do log local (não gasta requisições).")
 def requests(
     today: Annotated[
-        bool, typer.Option("--today", help="Só o dia atual da cota (UTC, renova às 21h).")
+        bool,
+        typer.Option(
+            "--today", help="Só o dia atual da cota, que começa à 00h UTC (21h em Brasília)."
+        ),
     ] = False,
 ) -> None:
     settings = _load_settings()
