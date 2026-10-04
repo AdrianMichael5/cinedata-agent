@@ -68,7 +68,53 @@ A resposta termina com um rodapé: modelo usado, chamadas ao LLM e requisições
 
 ## Exemplos reais
 
-<!-- PREENCHER APÓS EVAL -->
+Respostas do eval final de 04/10/2026 (`eval/results/latest.md`), resumidas: frase de abertura e as 3 primeiras linhas da tabela.
+
+**Q04: "Os 5 filmes mais populares"**, armadilha dos anos gravados na coluna de popularidade evitada. Modelo `qwen/qwen3.8-27b:free`, 3 requisições.
+
+> Os 5 filmes mais populares do catálogo são liderados por **Blue Beetle** (2023), com índice de popularidade de 2.994,4.
+>
+> | # | Filme | Lançamento | Popularidade |
+> |---|---|---|---|
+> | 1 | Blue Beetle | 2023-08-16 | 2.994,4 |
+> | 2 | Gran Turismo | 2023-08-09 | 2.680,6 |
+> | 3 | The Nun II | 2023-09-06 | 1.692,8 |
+
+**Q01: "Top 10 filmes com maior receita em R$"**, ranking em R$. Modelo `nvidia/nemotron-3-super-120b-a12b:free`, 3 requisições.
+
+> Os 10 filmes com maior receita em R$ são:
+>
+> | titulo | ano_lancamento | receita_brl |
+> |---|---|---|
+> | Avatar: The Way Of Water | 2022 | 12.390.136.500,54 |
+> | Avengers: Endgame | 2019 | 11.094.720.000,00 |
+> | Spider-man: No Way Home | 2021 | 10.977.782.882,74 |
+
+**Q09: "Dupla ator–diretor que mais trabalhou junta"**, contagem por obra. Modelo `qwen/qwen3.8-27b:free`, 3 requisições.
+
+> A dupla ator–diretor que mais trabalhou junta é **Joe Anoa'i** com **Kevin Dunn**, em 37 obras.
+>
+> | Ator | Diretor | Obras |
+> |---|---|---|
+> | Joe Anoa'i | Kevin Dunn | 37 |
+> | Colby Lopez | Kevin Dunn | 32 |
+> | Jeff Kirkendall | Mark Polonia | 25 |
+
+**Q12: "Gênero com maior margem de lucro média"**, margem agregada (`SUM(lucro) / SUM(receita)`). Modelo `qwen/qwen3.8-27b:free`, 3 requisições.
+
+> O gênero com maior margem de lucro agregada é **Terror (Horror)**, com 75,92% de margem sobre 168 filmes.
+>
+> | Gênero | Margem (%) | Filmes |
+> |---|---|---|
+> | Terror | 75,92 | 168 |
+> | Aventura | 69,59 | 246 |
+> | Animação | 69,45 | 97 |
+
+A SQL executada de cada pergunta está em `eval/results/latest.md`. Para vê-la numa pergunta sua:
+
+```bash
+cinedata ask "Gênero com maior margem de lucro média" --show-sql
+```
 
 ## Aderência ao enunciado
 
@@ -161,7 +207,32 @@ python eval/run_eval.py             # avalia o agente nas 14 perguntas de eval/g
   - **armadilha:** o erro documentado, que reprova e aparece no relatório.
 - **Sem vazamento do eval:** testes garantem que nenhum exemplo do prompt coincide com as perguntas do gabarito e que o prompt não cita o gabarito nem o eval.
 
-Placar: <!-- PREENCHER APÓS EVAL -->
+### Placar do eval final
+
+Execução de 04/10/2026 com o prompt do commit `a6bf020`, gerada por `python eval/run_eval.py` com `REFERENCE_DATE=2026-10-01` e comparação determinística. Relatório completo, com a SQL de cada pergunta, em `eval/results/latest.md`.
+
+| ID | Pergunta | Aprovada | Bateu com | Modelo | Requisições | Tempo |
+|---|---|---|---|---|---|---|
+| Q01 | Top 10 filmes com maior receita em R$ | sim | esperada: Ranking em R$ | `nvidia/nemotron-3-super-120b-a12b:free` | 3 | 10,3 s |
+| Q02 | Lucro médio por gênero, considerando apenas filmes com receita informada | sim | esperada: Receita e orçamento informados | `qwen/qwen3.8-27b:free` | 2 | 28,7 s |
+| Q03 | Filmes com maior margem de lucro, entre os que possuem receita e orçamento informados | sim | esperada: Com orçamento >= US$ 100 mil | `qwen/qwen3.8-27b:free` | 2 | 8,3 s |
+| Q04 | Os 5 filmes mais populares | sim | esperada: Sem anos vazados | `qwen/qwen3.8-27b:free` | 3 | 24,0 s |
+| Q05 | Filmes com maior divergência entre a nota TMDB e a nota IMDb | sim | esperada: Com >= 100 votos em cada base | `qwen/qwen3.8-27b:free` | 2 | 10,5 s |
+| Q06 | Nota média IMDb por ano de lançamento | sim | esperada: Por ano | `qwen/qwen3.8-27b:free` | 2 | 7,8 s |
+| Q07 | Ator com mais participações em filmes lançados nos últimos 5 anos | sim | esperada: Janela até hoje, contando por obra | `qwen/qwen3.8-27b:free` | 3 | 87,8 s |
+| Q08 | Diretores com maior nota média (mínimo de 5 filmes) | **não** | nenhuma | `qwen/qwen3.8-27b:free` | 2 | 39,4 s |
+| Q09 | Dupla ator–diretor que mais trabalhou junta | sim | esperada: Por obra | `qwen/qwen3.8-27b:free` | 3 | 175,8 s |
+| Q10 | Quantidade de filmes por gênero | sim | esperada: Por gênero | `qwen/qwen3.8-27b:free` | 2 | 23,6 s |
+| Q11 | Produtora com maior lucro total | sim | esperada: Receita e orçamento informados | `qwen/qwen3.8-27b:free` | 2 | 13,2 s |
+| Q12 | Gênero com maior margem de lucro média | sim | esperada: Margem agregada: SUM(lucro) / SUM(receita) | `qwen/qwen3.8-27b:free` | 3 | 28,4 s |
+| Q13 | Filmes mais avaliados pelos usuários | sim | esperada: Por obra | `qwen/qwen3.8-27b:free` | 2 | 47,0 s |
+| Q14 | Filmes em que a nota média dos usuários mais diverge da nota IMDb | sim | esperada: Com >= 3 avaliações | `qwen/qwen3.8-27b:free` | 2 | 12,2 s |
+
+- **13 de 14 aprovadas**, todas pela resposta esperada; **7 de 7 armadilhas evitadas**.
+- **33 requisições** para as 14 perguntas: de 2 a 3 por pergunta, por causa do fallback entre modelos. Nenhum aviso de resposta degenerada.
+- **Reprovada: Q08.** A referência conta linhas por `sk_movie_id`; o agente conta obras distintas (título + data). O primeiro colocado da referência, Scott Wozniak (5 ids, 4 obras), fica abaixo do mínimo de 5 filmes no agente e sai do ranking. Recall@5 de 0,8: 4 dos 5 primeiros coincidem.
+- **Contagem por obra e por id:** as contagens por obra diferem levemente da referência por id (por exemplo, Drama com 28.064 contra 28.086 na Q10). Essas perguntas foram aprovadas porque o primeiro colocado e o ranking coincidem.
+- **Tempos:** a Q09 leva cerca de 3 minutos (duas junções de pessoas); as demais, de 8 a 90 s.
 
 ## Limitações conhecidas
 
