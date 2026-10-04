@@ -225,6 +225,23 @@ class TestAnswerCache:
 
         assert cache.put(cache.key_for(make_settings(), "q"), "q", make_answer(), 2) is False
 
+    @pytest.mark.parametrize("cleanup_error", [NotADirectoryError, PermissionError])
+    def test_failed_temp_cleanup_does_not_raise(self, tmp_path, monkeypatch, caplog, cleanup_error):
+        # Linux reports a file used as the parent folder as NotADirectoryError, which
+        # unlink(missing_ok=True) does not swallow; Windows reports FileNotFoundError.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        cache = AnswerCache(blocker, max_rows=200, max_llm_calls=MAX_LLM_CALLS)
+
+        def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+            raise cleanup_error(f"cannot remove {self.name}")
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        caplog.set_level(logging.WARNING, logger="cinedata_agent.cache")
+
+        assert cache.put(cache.key_for(make_settings(), "q"), "q", make_answer(), 2) is False
+        assert any("Could not write" in record.getMessage() for record in caplog.records)
+
     def test_clear_removes_every_entry(self, cache, tmp_path):
         for question in ("a", "b", "c"):
             cache.put(cache.key_for(make_settings(), question), question, make_answer(), 2)

@@ -149,7 +149,7 @@ class AnswerCache:
             os.replace(temporary, path)
         except OSError as error:
             logger.warning("Could not write the cache entry %s: %s", path.name, error)
-            temporary.unlink(missing_ok=True)
+            _discard(temporary)
             return False
         return True
 
@@ -165,6 +165,16 @@ class AnswerCache:
 
     def _path(self, key: str) -> Path:
         return self.directory / ANSWERS_DIR / f"{key}.json"
+
+
+def _discard(temporary: Path) -> None:
+    """Best-effort removal of a half-written temp file; never raises."""
+    # missing_ok only covers FileNotFoundError (what Windows reports when the parent is a
+    # file); Linux reports NotADirectoryError, and a read-only folder gives PermissionError.
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError as error:
+        logger.debug("Could not remove the temporary cache file %s: %s", temporary.name, error)
 
 
 def _parse(data: Any) -> CachedAnswer | None:
