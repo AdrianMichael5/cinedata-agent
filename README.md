@@ -4,7 +4,7 @@ Agente Text-to-SQL em Python que responde, em português, perguntas em linguagem
 Ele consulta o banco `data/cinerocket.db` (SQLite, camada Gold) **somente para leitura**, por tool calling direto, sem LangChain.
 Os modelos são os gratuitos do OpenRouter: quatro com sufixo `:free` e o roteador `openrouter/free` por último, em ordem de fallback.
 
-**Índice:** [Início rápido](#início-rápido) · [Como usar](#como-usar) · [Exemplos reais](#exemplos-reais) · [Aderência ao enunciado](#aderência-ao-enunciado) · [Arquitetura](#arquitetura) · [Decisões de projeto](#decisões-de-projeto) · [Guardrails e resiliência](#guardrails-e-resiliência) · [Testes e avaliação](#testes-e-avaliação) · [Limitações conhecidas](#limitações-conhecidas) · [Apêndices](#apêndice-a-variáveis-do-env)
+**Índice:** [Início rápido](#início-rápido) · [Como usar](#como-usar) · [Exemplos reais](#exemplos-reais) · [Aderência ao enunciado](#aderência-ao-enunciado) · [Arquitetura](#arquitetura) · [Decisões de projeto](#decisões-de-projeto) · [Guardrails e resiliência](#guardrails-e-resiliência) · [Testes e avaliação](#testes-e-avaliação) · [Apêndices](#apêndice-a-variáveis-do-env) · [Limitações conhecidas](#limitações-conhecidas)
 
 ## Início rápido
 
@@ -131,7 +131,7 @@ cinedata ask "Gênero com maior margem de lucro média" --show-sql
 | Perguntas de exemplo do enunciado | As 14 estão no gabarito, com avaliação automática | `eval/gabarito.json` |
 | Extras: guardrails, fallback, cache, avaliação | Implementados | seções abaixo |
 | Extra: módulo FastAPI | Implementado, opcional | [Apêndice D](#apêndice-d-api-http-fastapi) |
-| Extras: interface visual, gráficos, memória de conversa, busca semântica, Gold no Databricks | **Não implementados.** `DB_BACKEND=databricks` gera erro. | — |
+| Extras: interface visual, gráficos, memória de conversa, busca semântica, Gold no Databricks | **Não implementados.** | [Limitações conhecidas](#limitações-conhecidas) |
 
 ## Arquitetura
 
@@ -184,7 +184,6 @@ flowchart LR
 - **Limites:** tempo por consulta (`QUERY_TIMEOUT_SECONDS`), linhas por resultado (`MAX_ROWS`) e 10 MB por valor.
 - **Resposta degenerada:** mais de 6.000 caracteres, trecho repetido 20 vezes ou raciocínio vazado em inglês. O agente tenta de novo com o próximo modelo se o orçamento permitir; senão, responde com o resultado e um aviso.
 - **Resposta truncada** (`finish_reason = "length"`): conta como falha daquele modelo e passa ao próximo.
-- **Números:** o prompt manda usar só valores vindos de `run_sql`. É uma instrução, não uma verificação do código.
 - **Cota:** `max_retries = 0` no SDK; teto de 6 requisições e 3 chamadas ao LLM por pergunta. Ao atingir o teto com um resultado de SQL já obtido, o agente responde com esse resultado e um aviso.
 - **Fallback:** 401, 402 e o 429 de cota diária param na hora; os demais erros passam ao próximo modelo ([Apêndice B](#apêndice-b-erros-do-openrouter)).
 
@@ -261,18 +260,9 @@ Execução de 04/10/2026 com o prompt do commit `a6bf020`, gerada por `python ev
 
 - **13 de 14 aprovadas**, todas pela resposta esperada; **7 de 7 armadilhas evitadas**.
 - **33 requisições** para as 14 perguntas: de 2 a 3 por pergunta, por causa do fallback entre modelos. Nenhum aviso de resposta degenerada.
-- **Reprovada: Q08.** A referência conta linhas por `sk_movie_id`; o agente conta obras distintas (título + data). O primeiro colocado da referência, Scott Wozniak (5 ids, 4 obras), fica abaixo do mínimo de 5 filmes no agente e sai do ranking. Recall@5 de 0,8: 4 dos 5 primeiros coincidem.
+- **Reprovada: Q08** (contagem por obra contra contagem por id; ver [Limitações conhecidas](#limitações-conhecidas)). Recall@5 de 0,8: 4 dos 5 primeiros coincidem.
 - **Contagem por obra e por id:** as contagens por obra diferem levemente da referência por id (por exemplo, Drama com 28.064 contra 28.086 na Q10). Essas perguntas foram aprovadas porque o primeiro colocado e o ranking coincidem.
-- **Tempos:** a Q09 leva cerca de 3 minutos (duas junções de pessoas); as demais, de 8 a 90 s.
-
-## Limitações conhecidas
-
-- **Cópias do mesmo filme com datas diferentes.** A chave de obra (título + data) não junta essas cópias. O agente cita isso quando afeta a resposta.
-- **Outliers financeiros.** Há orçamentos de US$ 1 e receitas minúsculas. Os filtros mínimos reduzem o problema, mas não cobrem todos os casos.
-- **Variação dos modelos gratuitos.** Qualidade, latência e disponibilidade mudam ao longo do dia (há respostas 429 de capacidade do provedor). Respostas podem variar entre execuções.
-- **Consultas com duas junções de pessoas.** A SQL do agente para a dupla ator–diretor levou cerca de 55 s no banco real. Na mesma pergunta, filtrar por papel e período em CTEs antes de juntar levou cerca de 35 a 50 s, e as junções diretas levaram cerca de 180 a 210 s, acima do limite padrão de 120 s. O tempo varia entre execuções.
-- **Dados de 2024 e 2025.** Há poucos filmes lançados nesses anos, e quase nenhum em 2025.
-- **Q08: contagem de obras e de ids.** A referência conta linhas por `sk_movie_id`; o agente conta obras distintas (título + data), conforme a regra do projeto. Um diretor cujos filmes incluem cópias da mesma obra pode ficar abaixo do mínimo de 5 no agente e dentro dele na referência (caso de Scott Wozniak: 5 ids, 4 obras).
+- **Tempos:** a Q09 leva cerca de 3 minutos (duas junções de pessoas); as demais, de 8 a 90 s (ver [Limitações conhecidas](#limitações-conhecidas)).
 
 ---
 
@@ -366,7 +356,7 @@ cinedata-agent/
 │   ├── llm/              # cliente OpenRouter, erros, cota, log de requisições
 │   ├── prompts/          # sqlite.md e montagem do prompt
 │   └── evaluation/       # gabarito, comparação, classificação, relatório
-├── eval/                 # gabarito.json, GABARITO.md, run_eval.py (resultados locais em eval/results/, não versionados)
+├── eval/                 # gabarito.json, GABARITO.md, run_eval.py (eval/results/: JSON locais; eval/results/latest.md versionado)
 ├── tests/                # unitários e integração
 ├── .github/workflows/    # CI
 ├── .env.example
@@ -387,5 +377,19 @@ Segundo a documentação da atividade, a Gold do autor difere da oficial em:
 - tabelas: sem `movie_reviews` e com uma tabela de contexto para busca semântica.
 
 Por isso, as regras de negócio e o gabarito deste agente valem para o `cinerocket.db`.
+
+## Limitações conhecidas
+
+- **Q08 (contagem por obra):** a referência conta linhas por `sk_movie_id`; o agente conta obras distintas (título + data), conforme a regra do projeto, e um diretor com cópias da mesma obra pode ficar abaixo do mínimo de 5 (caso de Scott Wozniak: 5 ids, 4 obras).
+- **Cópias com datas diferentes:** a chave de obra (título + data) não junta cópias do mesmo filme com datas diferentes; o agente cita isso quando afeta a resposta.
+- **Outliers financeiros:** há orçamentos de US$ 1 e receitas minúsculas; os filtros mínimos reduzem o problema, mas não cobrem todos os casos.
+- **Dados de 2024 e 2025:** há poucos filmes lançados nesses anos, e quase nenhum em 2025.
+- **Números não verificados:** o prompt manda usar só valores vindos de `run_sql`; é uma instrução, não uma verificação do código.
+- **Duas junções de pessoas:** a SQL do agente para a dupla ator–diretor levou cerca de 55 s no banco real.
+- **Filtrar cedo:** na mesma pergunta, filtrar por papel e período em CTEs antes de juntar levou cerca de 35 a 50 s, e as junções diretas levaram cerca de 180 a 210 s, acima do limite padrão de 120 s; o tempo varia entre execuções.
+- **Modelos gratuitos:** qualidade, latência e disponibilidade mudam ao longo do dia (há respostas 429 de capacidade do provedor), e as respostas podem variar entre execuções.
+- **Cota diária:** a conta gratuita tem 50 requisições por dia; uma pergunta costuma usar 2 e nunca passa de 6.
+- **Não implementado:** memória de conversa, gráficos, interface visual, busca semântica e Gold no Databricks (`DB_BACKEND=databricks` gera erro).
+- **API sem autenticação:** não há autenticação nem limite de requisições na API; use só em localhost ([Apêndice D](#apêndice-d-api-http-fastapi)).
 
 Licença: MIT
