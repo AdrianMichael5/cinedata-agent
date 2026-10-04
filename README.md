@@ -356,3 +356,5 @@ Segundo a documentação da atividade, a Gold do autor difere da oficial em:
 - tabelas: sem `movie_reviews` e com uma tabela de contexto para busca semântica.
 
 Por isso, as regras de negócio e o gabarito deste agente valem para o `cinerocket.db`.
+
+Licença: MIT
