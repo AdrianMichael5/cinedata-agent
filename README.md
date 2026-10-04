@@ -188,6 +188,37 @@ flowchart LR
 - **Cota:** `max_retries = 0` no SDK; teto de 6 requisições e 3 chamadas ao LLM por pergunta. Ao atingir o teto com um resultado de SQL já obtido, o agente responde com esse resultado e um aviso.
 - **Fallback:** 401, 402 e o 429 de cota diária param na hora; os demais erros passam ao próximo modelo ([Apêndice B](#apêndice-b-erros-do-openrouter)).
 
+### Guardrails em ação
+
+Nenhum destes comandos chama o OpenRouter nem consome cota. O banco é aberto em modo somente leitura e toda SQL passa pelo validador e pelo authorizer do SQLite antes de executar.
+
+```text
+$ cinedata sql "DELETE FROM dim_movies"
+Instrução não permitida: DELETE. Apenas consultas de leitura (SELECT) são aceitas.
+
+$ cinedata sql "SELECT * FROM sqlite_master"
+Tabela não permitida: sqlite_master. Tabelas disponíveis: bridge_movie_company, bridge_movie_genre,
+bridge_movie_person, dim_companies, dim_genres, dim_movies, dim_people, dim_reviews,
+fact_movies_performance, movie_reviews.
+
+$ cinedata sql "SELECT 1; DROP TABLE dim_movies"
+Envie apenas uma instrução por vez; foram encontradas 2
+```
+
+Uma consulta de leitura válida passa normalmente:
+
+```text
+$ cinedata sql "SELECT nome_genero FROM dim_genres ORDER BY nome_genero LIMIT 3"
+┌─────────────┐
+│ nome_genero │
+├─────────────┤
+│ Action      │
+│ Adventure   │
+│ Animation   │
+└─────────────┘
+3 linha(s) em 14 ms
+```
+
 ## Testes e avaliação
 
 ```bash
