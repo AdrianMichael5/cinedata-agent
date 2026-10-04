@@ -10,6 +10,7 @@ import pytest
 from fakes import FAKE_MODEL, FakeLLM, text_message, tool_call_message
 from typer.testing import CliRunner
 
+import cinedata_agent
 from cinedata_agent import cli
 from cinedata_agent.cli import app
 from cinedata_agent.llm.errors import (
@@ -350,6 +351,10 @@ def test_version_option_prints_installed_version(flag):
 
     assert result.exit_code == 0
     assert result.output.strip() == f"cinedata-agent {metadata.version('cinedata-agent')}"
+
+
+def test_package_version_matches_installed_distribution():
+    assert cinedata_agent.__version__ == metadata.version("cinedata-agent")
 
 
 def test_commands_silence_sqlglot_warnings(monkeypatch, sample_db):

@@ -1,5 +1,6 @@
 import logging
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,14 @@ def make_client(
 
 def answered() -> list[Any]:
     return [tool_call_message(COUNT_SQL), text_message("O catálogo tem 5 filmes.")]
+
+
+def test_openapi_version_matches_installed_distribution(tmp_path, sample_db):
+    client, _ = make_client(tmp_path, sample_db)
+
+    info = client.get("/openapi.json").json()["info"]
+
+    assert info["version"] == metadata.version("cinedata-agent")
 
 
 class TestAsk:

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from cinedata_agent import __version__
 from cinedata_agent.agent import Agent, ChatModel
 from cinedata_agent.cache import AnswerCache
 from cinedata_agent.config import Settings, get_settings
@@ -81,7 +82,7 @@ def create_app(
     llm_factory = make_llm or (lambda: LLMClient(config))
     cache = AnswerCache.from_settings(config)
 
-    app = FastAPI(title="CineData Agent", version="0.1.0")
+    app = FastAPI(title="CineData Agent", version=__version__)
 
     # Sync handlers on purpose: FastAPI runs them in a thread, since the agent and SQLite block.
     @app.post("/api/v1/ask", response_model=AskResponse)
